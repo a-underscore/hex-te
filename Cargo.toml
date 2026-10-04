@@ -1,0 +1,36 @@
+[package]
+name = "hex-te"
+version = "0.1.0"
+edition = "2024"
+description = "A minimal GPU-accelerated terminal emulator template built on wgpu"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+# Windowing + the GPU abstraction the renderer is written against.
+winit = "0.30.13"
+wgpu = "30.0.1"
+pollster = "1.0.1"
+
+# Hosting a shell: `portable-pty` allocates the pty pair and spawns the child.
+portable-pty = "0.9.0"
+
+# Text: `fontdb` finds a monospace font installed on the system, `fontdue`
+# rasterizes glyphs into the coverage atlas the shader samples.
+fontdb = "0.24.0"
+fontdue = "0.9.4"
+
+bytemuck = { version = "1.25.2", features = ["derive"] }
+anyhow = "1.0.100"
+env = "1.0.1"
+
+[dev-dependencies]
+# The same WGSL front end wgpu uses, so the shader can be validated in tests on
+# machines with no graphics driver.
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+
+# Best-effort release profile: a terminal is a latency-sensitive interactive
+# program, and thin LTO keeps the binary small without a long link step.
+[profile.release]
+lto = "thin"
+codegen-units = 1
