@@ -9,7 +9,6 @@ pub(crate) struct Pty {
 impl Pty {
     pub fn new() -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
-
         let pair = pty_system.openpty(PtySize {
             rows: 24,
             cols: 80,
@@ -26,10 +25,13 @@ impl Pty {
     }
 
     pub fn read(&mut self, buffer: &mut Vec<u8>) -> Result<(), Error> {
-        let mut buf = [0u8; 1024];
-        let n = self.pair.master.try_clone_reader()?.read(&mut buf)?;
+        self.pair.master.try_clone_reader()?.read(buffer)?;
 
-        buffer.extend_from_slice(&buf[..n]);
+        Ok(())
+    }
+
+    pub fn write(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
+        self.pair.master.take_writer()?.write(buffer)?;
 
         Ok(())
     }

@@ -7,9 +7,6 @@ use crate::{WINDOW_TITLE, terminal::Terminal};
 
 const SCREEN_SHADER: &str = include_str!("shaders/screen.wgsl");
 
-const GRID_COLUMNS: u32 = 80;
-const GRID_ROWS: u32 = 24;
-
 const CURSOR_BLOCK: u32 = 0;
 
 const BACKGROUND: [f32; 4] = [0.05, 0.06, 0.08, 1.0];
@@ -25,6 +22,8 @@ struct ScreenUniforms {
     cursor: [u32; 2],
     cursor_visible: u32,
     cursor_style: u32,
+    cursor_size: [f32; 2],
+    padding: [u32; 2],
 }
 
 pub(crate) struct Gpu {
@@ -191,10 +190,12 @@ impl Gpu {
             background: BACKGROUND,
             cursor_color: CURSOR_COLOR,
             resolution: [config.width as f32, config.height as f32],
-            grid: [GRID_COLUMNS, GRID_ROWS],
+            grid: [1, 1],
             cursor: [0, 0],
             cursor_visible: 1,
             cursor_style: CURSOR_BLOCK,
+            cursor_size: [0.0, 0.0],
+            padding: [0; 2],
         };
 
         let screen_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -297,6 +298,15 @@ impl Gpu {
                 self.bind_terminal_texture(texture);
             }
         }
+
+        self.screen.cursor = [
+            terminal.cursor_position.0 as u32,
+            terminal.cursor_position.1 as u32,
+        ];
+        self.screen.grid = [terminal.size.0 as u32, terminal.size.1 as u32];
+        self.screen.cursor_size = [terminal.cursor_size.0, terminal.cursor_size.1];
+        self.queue
+            .write_buffer(&self.screen_buffer, 0, bytemuck::bytes_of(&self.screen));
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

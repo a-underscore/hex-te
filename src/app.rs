@@ -3,7 +3,7 @@ use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::WindowEvent,
+    event::{ElementState, KeyEvent, WindowEvent},
     event_loop::ActiveEventLoop,
     window::{Window, WindowId},
 };
@@ -26,7 +26,7 @@ impl App {
         Ok(Self {
             pty: Pty::new()?,
             gpu: None,
-            terminal: Some(Terminal::default()),
+            terminal: Some(Terminal::new()?),
         })
     }
 }
@@ -49,8 +49,6 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-
-        self.terminal = Some(Terminal::default());
 
         match pollster::block_on(Gpu::new(window)) {
             Ok(gpu) => {
@@ -76,7 +74,10 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
+            WindowEvent::Resized(size) => {
+                gpu.resize(size.width, size.height);
+                gpu.request_redraw();
+            }
             WindowEvent::RedrawRequested => {
                 let Some(terminal) = self.terminal.as_mut() else {
                     return;
@@ -84,6 +85,20 @@ impl ApplicationHandler for App {
 
                 if let Err(error) = gpu.render(terminal) {
                     eprintln!("{WINDOW_TITLE}: {error:#}");
+                }
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: key,
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                if let Some(terminal) = self.terminal.as_mut() {
+                    terminal.handle_key_event(key);
+                    gpu.request_redraw();
                 }
             }
             _ => {}

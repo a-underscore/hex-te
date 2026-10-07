@@ -10,6 +10,8 @@ struct Screen {
     cursor: vec2<u32>,
     cursor_visible: u32,
     cursor_style: u32,
+    cursor_size: vec2<f32>,
+    padding: vec2<u32>,
 }
 
 @group(0) @binding(0) var<uniform> screen: Screen;
@@ -27,30 +29,40 @@ fn grid_size() -> vec2<u32> {
 }
 
 fn cell_size() -> vec2<f32> {
-    return screen.resolution / vec2<f32>(grid_size());
+    return max(screen.cursor_size, vec2<f32>(1.0));
 }
 
 fn cell_at(pixel: vec2<f32>) -> vec2<u32> {
     return min(vec2<u32>(pixel / cell_size()), grid_size() - vec2<u32>(1u));
 }
 
-fn cursor_mask(local: vec2<f32>, size: vec2<f32>, style: u32) -> f32 {
+fn cursor_mask(local: vec2<f32>, cell_size: vec2<f32>, style: u32) -> f32 {
+    let text_size = min(screen.cursor_size, cell_size);
+    let origin = (cell_size - text_size) * 0.5;
+    let inside = all(local >= origin) && all(local < origin + text_size);
+
     switch style {
         case 1u: {
-            return select(0.0, 1.0, local.x < max(1.0, size.x * 0.125));
+            let bar_width = max(1.0, text_size.x * 0.125);
+            return select(0.0, 1.0, inside && local.x < origin.x + bar_width);
         }
         case 2u: {
-            return select(0.0, 1.0, local.y >= size.y - max(1.0, size.y * 0.125));
+            let underline_height = max(1.0, text_size.y * 0.125);
+            return select(
+                0.0,
+                1.0,
+                inside && local.y >= origin.y + text_size.y - underline_height,
+            );
         }
         default: {
-            return 1.0;
+            return select(0.0, 1.0, inside);
         }
     }
 }
 
 @fragment
 fn fs_screen(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let size = cell_size();
+    let size = cell_size() ;
     let cell = cell_at(position.xy);
 
     // The texture covers the whole screen, so a pixel position maps straight
