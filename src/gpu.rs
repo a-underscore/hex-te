@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -9,31 +8,20 @@ use crate::{WINDOW_TITLE, terminal::Terminal};
 
 const SCREEN_SHADER: &str = include_str!("shaders/screen.wgsl");
 
-/// The WGSL the screen pipeline is built from.
+/// The WGSL the screen pipeline is built from: the source the config wrote, or
+/// the shader compiled into the binary when the config set none.
 ///
-/// A config that names a file is read here, at startup, which makes editing the
-/// shader a restart instead of a rebuild. Anything wrong with the name — a file
-/// that is missing or cannot be read — is reported and the shader compiled into
-/// the binary is used instead, so a bad path never leaves the terminal without a
-/// pipeline at all.
-fn screen_shader(path: Option<&Path>) -> Cow<'static, str> {
-    let Some(path) = path else {
-        return Cow::Borrowed(SCREEN_SHADER);
-    };
-
-    match std::fs::read_to_string(path) {
-        Ok(source) => Cow::Owned(source),
-        Err(error) => {
-            eprintln!("{WINDOW_TITLE}: reading {}: {error}", path.display());
-
-            Cow::Borrowed(SCREEN_SHADER)
-        }
+/// The config is read at startup, so changing the shader is a restart rather than
+/// a rebuild.
+fn screen_shader(source: Option<&str>) -> Cow<'static, str> {
+    match source {
+        Some(source) => Cow::Owned(source.to_owned()),
+        None => Cow::Borrowed(SCREEN_SHADER),
     }
 }
 
 // The shaped cursor the pipeline starts with, before a shell asks for another
-// one with `DECSCUSR`. The numbers are the ones `src/shaders/screen.wgsl`
-// matches on, and `terminal::CursorStyle::shape` produces.
+// one with `DECSCUSR`; the numbers are what `src/shaders/screen.wgsl` matches on.
 const CURSOR_BLOCK: u32 = 0;
 
 #[repr(C)]
@@ -95,12 +83,12 @@ impl Gpu {
     /// Opens the surface on `window` and builds the screen pipeline.
     ///
     /// `background` and `cursor_color` come from the config file, as `r, g, b, a`,
-    /// and `shader` is the WGSL file the config named, when it named one.
+    /// and `shader` is the WGSL source the config wrote, when it wrote one.
     pub(crate) async fn new(
         window: Arc<Window>,
         background: [f32; 4],
         cursor_color: [f32; 4],
-        shader: Option<&Path>,
+        shader: Option<&str>,
     ) -> anyhow::Result<Self> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -381,35 +369,16 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     use super::{SCREEN_SHADER, screen_shader};
-    use std::path::{Path, PathBuf};
-
-    /// A path under the temp dir that this test owns.
-    fn scratch(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("hext-shader-{}-{name}.wgsl", std::process::id()))
-    }
 
     #[test]
-    fn the_compiled_shader_is_what_no_setting_gets() {
+    fn the_compiled_shader_is_what_an_unset_setting_gets() {
         assert_eq!(&*screen_shader(None), SCREEN_SHADER);
     }
 
     #[test]
-    fn a_named_shader_file_is_loaded_instead() {
-        let path = scratch("named");
-        std::fs::write(&path, "// the file the config named\n").unwrap();
+    fn the_configs_own_shader_is_used_instead() {
+        let source = "// the WGSL the config wrote\n";
 
-        assert_eq!(
-            &*screen_shader(Some(&path)),
-            "// the file the config named\n"
-        );
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn a_shader_file_that_cannot_be_read_falls_back() {
-        let missing = Path::new("/nonexistent/hext/screen.wgsl");
-
-        assert_eq!(&*screen_shader(Some(missing)), SCREEN_SHADER);
+        assert_eq!(&*screen_shader(Some(source)), source);
     }
 }

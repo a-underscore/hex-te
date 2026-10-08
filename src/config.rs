@@ -31,9 +31,9 @@ pub(crate) struct Config {
     pub background: [f32; 4],
     /// Cursor colour, as `r, g, b, a`.
     pub cursor_color: [f32; 4],
-    /// A WGSL file to load the screen pipeline from. `None` keeps the shader
-    /// compiled into the binary, which is what the app ships with.
-    pub shader: Option<PathBuf>,
+    /// The WGSL the screen pipeline is built from, as source. `None` keeps the
+    /// shader compiled into the binary, which is what the app ships with.
+    pub shader: Option<String>,
 }
 
 impl Default for Config {
@@ -71,9 +71,12 @@ shell = None
 background = (0.05, 0.06, 0.08)
 cursor_color = (0.16, 0.72, 0.72)
 
-# A WGSL file to draw the screen texture and the cursor with, so a shader can be
-# edited without rebuilding the terminal. `None`, or a file that cannot be read,
-# keeps the shader the binary was built with.
+# The screen shader, as WGSL source: the shader the terminal draws with is part
+# of this file. It needs the `vs_screen` and `fs_screen` entry points and the
+# bindings `src/shaders/screen.wgsl` uses, which is also what `None` falls back
+# to. Because this is Python, a file can be read instead of pasted:
+#
+#     shader = open("/home/you/.config/hext/crt.wgsl").read()
 shader = None
 
 # The app's entity-component world is bound here as `world`. It is the same
@@ -164,7 +167,7 @@ impl Config {
 
             py.run(source.as_c_str(), Some(&globals), None)?;
 
-            config.shader = setting_path(&globals, "shader");
+            config.shader = setting_text(&globals, "shader");
 
             Ok(())
         })?;
@@ -173,12 +176,12 @@ impl Config {
     }
 }
 
-/// Reads a setting that names a file.
+/// Reads a setting that holds text.
 ///
 /// A setting that is absent, `None`, or not a string keeps the default the
-/// config was built with: one bad name should not stop the rest of the file
+/// config was built with: one bad setting should not stop the rest of the file
 /// working, so the problem is reported and the default kept.
-fn setting_path(globals: &Bound<'_, PyDict>, name: &str) -> Option<PathBuf> {
+fn setting_text(globals: &Bound<'_, PyDict>, name: &str) -> Option<String> {
     let value = match globals.get_item(name) {
         Ok(Some(value)) if !value.is_none() => value,
         Ok(_) => return None,
@@ -190,9 +193,9 @@ fn setting_path(globals: &Bound<'_, PyDict>, name: &str) -> Option<PathBuf> {
     };
 
     match value.extract::<String>() {
-        Ok(text) => Some(PathBuf::from(text)),
+        Ok(text) => Some(text),
         Err(error) => {
-            eprintln!("{WINDOW_TITLE}: {name} is not a path: {error}");
+            eprintln!("{WINDOW_TITLE}: {name} is not text: {error}");
 
             None
         }
@@ -412,20 +415,20 @@ mod tests {
     }
 
     #[test]
-    fn the_shader_setting_names_the_file_to_load() {
-        let config = config("shader", "shader = '/tmp/hext/screen.wgsl'\n");
+    fn the_shader_setting_is_the_source_the_config_wrote() {
+        let shader = config("shader", "shader = '@vertex fn vs_screen() {}'\n");
 
-        assert_eq!(config.shader, Some(PathBuf::from("/tmp/hext/screen.wgsl")));
+        assert_eq!(shader.shader.as_deref(), Some("@vertex fn vs_screen() {}"));
     }
 
     #[test]
-    fn a_config_without_a_shader_loads_none() {
+    fn a_config_without_a_shader_keeps_the_built_in_one() {
         assert_eq!(config("no-shader", "font_size = 30.0\n").shader, None);
         assert_eq!(config("none-shader", "shader = None\n").shader, None);
     }
 
     #[test]
-    fn a_shader_setting_that_is_not_a_path_keeps_the_default() {
+    fn a_shader_setting_that_is_not_text_keeps_the_default() {
         assert_eq!(config("bad-shader", "shader = 42\n").shader, None);
     }
 }
