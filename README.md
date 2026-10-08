@@ -7,6 +7,24 @@ cargo run   # the terminal
 cargo test  # unit and shader tests
 ```
 
+## Screenshots
+
+Neovim open on `src/app.rs`, running inside hext:
+
+![Neovim open inside hext](docs/screenshot-1-neovim.png)
+
+`fastfetch`, and the 16 ANSI colours a shell script asked for:
+
+![fastfetch and the 16 ANSI colours](docs/screenshot-2-fastfetch.png)
+
+A fresh prompt, the window filled by the configured background:
+
+![A prompt on an otherwise empty screen](docs/screenshot-3-prompt.png)
+
+The colour swatch again, from a later capture:
+
+![The 16 ANSI colour swatch again](docs/screenshot-4-colours.png)
+
 ## Current behavior
 
 - Spawns a shell on a PTY — `$SHELL`, or the program named in the config — and
