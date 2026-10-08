@@ -1,17 +1,19 @@
 # hex-te
 
-A small GPU-rendered text-grid prototype written in Rust with `winit` and
-`wgpu`.
+A GPU-rendered terminal emulator written in Rust with `winit` and `wgpu`, which
+also hosts the engine core being ported from the Vulkano project in `../hex` (see
+[Engine core](#engine-core-ported-from-hex)).
 
 ```sh
-cargo run
-cargo test
+cargo run   # the terminal
+cargo test  # terminal, engine and shader tests
 ```
 
 ## Current behavior
 
-- Spawns `$SHELL` on a PTY and renders what it prints: this is a shell-connected
-  terminal emulator, not just a text widget.
+- Spawns a shell on a PTY — `$SHELL`, or the program named in the config — and
+  renders what it prints: this is a shell-connected terminal emulator, not just a
+  text widget.
 - Parses the shell's byte stream with a VT state machine (`vte`) into a character
   grid: `CR`, `LF`, `BS`, `TAB`, erasing, cursor movement, and scrolling all work.
 - Forwards keystrokes to the shell: arrows, Home/End, Insert/Delete, PageUp/Down,
@@ -55,7 +57,8 @@ import math
 font_size = math.floor(15.7)
 ```
 
-Note that a window manager is free to override the requested window size.
+The file is read once, when the app starts, so restart it to pick up an edit. A
+window manager is free to override the requested window size.
 
 ## Structure
 
@@ -117,7 +120,10 @@ history.
 - Rust edition 2024 toolchain.
 - A GPU driver supported by `wgpu`.
 - An installed monospace font, discovered through the system font database.
+- A Python 3 installation with a shared `libpython`: the config file *is* Python,
+  and `pyo3` embeds an interpreter to evaluate it. `pyo3` locates the interpreter
+  through `python3` on `PATH` (or `PYO3_PYTHON`).
 
 `cargo test` covers the terminal and the engine, and validates the shader and the
-VT grid without needing a GPU or a PTY. The tests that rasterize glyphs also need
-a system monospace font.
+VT grid without needing a GPU or a PTY. The config tests need a Python
+interpreter, and the tests that rasterize glyphs need a system monospace font.
