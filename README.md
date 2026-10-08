@@ -43,6 +43,26 @@ the shell echoes and prints, the reader thread collects the bytes and wakes the
 event loop, and the VT parser turns them into grid cells that `rasterize` uploads
 as a texture.
 
+## Library target (engine port)
+
+Besides the terminal binary, the package builds a library (`src/lib.rs`) holding
+the engine core being ported from the Vulkano project in `../hex`:
+
+| Module | Notes |
+| --- | --- |
+| `world::World` | Entity-component store plus the global ambient lighting values |
+| `components` | `Camera3`, `Trans3`, `Tag`; `Light3`/`Model` follow once the renderer does |
+| `control::Control` | The winit event plus an `exit` flag, handed to each system |
+| `world::System` | `init`/`update` units of per-frame behaviour, and their manager |
+
+Anything a system needs is expected to live in the world, so a system is handed
+the world (and the event) instead of a list of parameters — `World::spawn`,
+`attach`, `component` and friends exist so callers hold a world rather than an
+entity manager plus every component. The ambient values come out as
+`world::AmbientUniform`, a padding-free `bytemuck::Pod` struct ready for
+`Queue::write_buffer`; that layout is the one part that had to change from the
+Vulkano original, which wrote a descriptor subbuffer.
+
 ## Requirements
 
 - Rust edition 2024 toolchain.

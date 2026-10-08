@@ -61,6 +61,16 @@ impl EntityManager {
         self.entities.get(&eid).cloned()
     }
 
+    /// Creates the component manager for `C` without attaching anything, so the
+    /// type is present in the component map before its first component exists.
+    ///
+    /// Registering is idempotent: an existing manager is left alone.
+    pub fn register<C: Send + Sync + 'static>(&mut self) {
+        self.components
+            .entry(TypeId::of::<C>())
+            .or_insert(ComponentManager::<C>::new());
+    }
+
     pub fn add_component<C: Send + Sync + 'static>(&mut self, eid: Id, component: Arc<RwLock<C>>) {
         let entry = self
             .components
@@ -225,5 +235,18 @@ mod tests {
         // whole point of storing components behind `Arc<RwLock<_>>`.
         em.get_component::<Marker>(eid).unwrap().write().unwrap().0 = 9;
         assert_eq!(marker.read().unwrap().0, 9);
+    }
+
+    #[test]
+    fn registering_a_component_type_creates_its_manager() {
+        let shared = EntityManager::new();
+        let mut em = shared.write().unwrap();
+
+        assert!(em.get_component_manager::<Marker>().is_none());
+
+        em.register::<Marker>();
+
+        assert!(em.get_component_manager::<Marker>().is_some());
+        assert_eq!(em.component_count(0), 0);
     }
 }
