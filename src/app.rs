@@ -158,10 +158,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if let Some(bytes) = encode_key(&event.logical_key, self.modifiers) {
-                    if let Err(error) = self.pty.write(&bytes) {
-                        eprintln!("{WINDOW_TITLE}: {error:#}");
-                    }
+                if let Some(bytes) = encode_key(&event.logical_key, self.modifiers)
+                    && let Err(error) = self.pty.write(&bytes)
+                {
+                    eprintln!("{WINDOW_TITLE}: {error:#}");
                 }
 
                 // The shell echoes what it received, so the grid catches up

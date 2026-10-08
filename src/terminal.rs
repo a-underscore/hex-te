@@ -57,7 +57,9 @@ impl Terminal {
         // Anything the shell writes before the first frame is parsed into this
         // starting grid; `update_layout` resizes it to the window afterwards
         // without losing the text.
-        terminal.screen.resize(INITIAL_COLS as usize, INITIAL_ROWS as usize);
+        terminal
+            .screen
+            .resize(INITIAL_COLS as usize, INITIAL_ROWS as usize);
 
         Ok(terminal)
     }
@@ -425,7 +427,7 @@ impl Perform for Screen {
         match byte {
             0x08 => self.backspace(),
             0x09 => self.tab(),
-            0x0a | 0x0b | 0x0c => self.line_feed(),
+            0x0a..=0x0c => self.line_feed(),
             0x0d => self.carriage_return(),
             // BEL, SO, SI and friends change nothing on screen yet.
             _ => {}
@@ -678,4 +680,3 @@ mod tests {
         assert_eq!(terminal.screen.line(1).trim_end(), "X");
     }
 }
-
