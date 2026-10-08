@@ -63,11 +63,15 @@ entity manager plus every component. The ambient values come out as
 `Queue::write_buffer`; that layout is the one part that had to change from the
 Vulkano original, which wrote a descriptor subbuffer.
 
+The port lives on the `dev` branch; `master` still tracks the terminal-only
+history, and the terminal binary does not use the library yet.
+
 ## Requirements
 
 - Rust edition 2024 toolchain.
 - A GPU driver supported by `wgpu`.
 - An installed monospace font, discovered through the system font database.
 
-`cargo test` validates the shader and the VT grid without needing a GPU or a PTY.
-The tests that rasterize glyphs also need a system monospace font.
+`cargo test` covers the terminal and the engine, and validates the shader and the
+VT grid without needing a GPU or a PTY. The tests that rasterize glyphs also need
+a system monospace font.
