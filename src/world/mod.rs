@@ -1,5 +1,5 @@
-//! The entity-component world: an [`EntityManager`] plus global lighting
-//! values that apply to every rendered frame.
+//! The entity-component world: an [`EntityManager`] and a [`SystemManager`],
+//! plus global lighting values that apply to every rendered frame.
 
 pub mod entity_manager;
 pub mod system_manager;
@@ -15,27 +15,39 @@ use crate::components::{Camera3, Tag, Trans3};
 use crate::id::Id;
 
 /// Shared world state. The [`EntityManager`] holds every entity and its
-/// components; the ambient fields feed the 3D lighting pass so scenes are
-/// never fully black outside direct light.
-pub struct World {
+/// components, the [`SystemManager`] the behaviour that runs over them, and the
+/// ambient fields feed the 3D lighting pass so scenes are never fully black
+/// outside direct light.
+///
+/// `E` is the application's winit user event — the same one [`Control`] carries
+/// — so a system can be written against the events its app produces. The
+/// default keeps the engine usable with no user event at all.
+pub struct World<E: 'static = ()> {
     pub em: Arc<RwLock<EntityManager>>,
+    pub sm: Arc<RwLock<SystemManager<E>>>,
     pub ambient_color: Vector3<f32>,
     pub ambient_intensity: f32,
 }
 
-impl World {
-    /// Builds a world with its own entity manager, with the engine's component
-    /// managers already registered.
+impl<E: 'static> World<E> {
+    /// Builds a world with empty entity and system managers, with the engine's
+    /// component managers already registered.
     pub fn new(ambient_color: Vector3<f32>, ambient_intensity: f32) -> Arc<RwLock<Self>> {
-        Self::from_manager(EntityManager::new(), ambient_color, ambient_intensity)
+        Self::from_manager(
+            EntityManager::new(),
+            SystemManager::new(),
+            ambient_color,
+            ambient_intensity,
+        )
     }
 
-    /// Like [`World::new`], but over an entity manager you already have.
+    /// Like [`World::new`], but over the managers you already have.
     ///
     /// This is `hex`'s `World::new` signature: the ambient values are the only
-    /// part of a world that does not already live in the entity manager.
+    /// part of a world that does not already live in a manager.
     pub fn from_manager(
         em: Arc<RwLock<EntityManager>>,
+        sm: SystemManager<E>,
         ambient_color: Vector3<f32>,
         ambient_intensity: f32,
     ) -> Arc<RwLock<Self>> {
@@ -52,9 +64,30 @@ impl World {
 
         Arc::new(RwLock::new(Self {
             em,
+            sm: Arc::new(RwLock::new(sm)),
             ambient_color,
             ambient_intensity,
         }))
+    }
+
+    /// Adds a system to the world's own pipeline `pid`.
+    ///
+    /// Safe to call at any time, including from inside a running system: the
+    /// systems run from a [`World::systems`] snapshot, not from under the
+    /// manager's lock.
+    pub fn add_system<S: System<E>>(&self, pid: Id, system: S) {
+        self.sm.write().unwrap().add(pid, system);
+    }
+
+    /// A snapshot of the world's systems, ready to [`init`](SystemManager::init)
+    /// or [`update`](SystemManager::update).
+    ///
+    /// The snapshot is taken out of the manager's lock on purpose: the caller
+    /// runs the systems with the world and its manager free, so a system can
+    /// reach back into either without deadlocking. A system added while they run
+    /// joins the next snapshot, and so starts on the next event.
+    pub fn systems(&self) -> SystemManager<E> {
+        self.sm.read().unwrap().clone()
     }
 
     /// Adds an entity. `active` decides whether [`EntityManager::entities`]
@@ -143,19 +176,37 @@ pub struct AmbientUniform {
 
 #[cfg(test)]
 mod tests {
-    use super::{AmbientUniform, World};
+    use super::{AmbientUniform, System, World};
     use crate::components::{Camera3, Tag, Trans3};
+    use crate::control::Control;
     use nalgebra::Vector3;
+    use winit::event::Event;
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, RwLock};
 
     fn world() -> Arc<RwLock<World>> {
         World::new(Vector3::zeros(), 0.0)
     }
 
+    /// Counts the frames it has been updated for.
+    struct Frames(Arc<AtomicUsize>);
+
+    impl System for Frames {
+        fn update(
+            &mut self,
+            _control: Arc<RwLock<Control>>,
+            _world: Arc<RwLock<World>>,
+        ) -> anyhow::Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+
+            Ok(())
+        }
+    }
+
     #[test]
     fn ambient_values_reach_the_shader_layout() {
-        let world = World::new(Vector3::new(0.1, 0.2, 0.3), 2.0);
+        let world: Arc<RwLock<World>> = World::new(Vector3::new(0.1, 0.2, 0.3), 2.0);
         let uniform = world.read().unwrap().ambient_uniform();
 
         assert_eq!(uniform.color, [0.1, 0.2, 0.3]);
@@ -196,6 +247,28 @@ mod tests {
         world.detach::<Trans3>(eid);
 
         assert!(world.component::<Trans3>(eid).is_none());
+    }
+
+    #[test]
+    fn a_system_added_to_the_world_runs_through_the_worlds_manager() {
+        let world = world();
+        let frames = Arc::new(AtomicUsize::new(0));
+
+        world
+            .read()
+            .unwrap()
+            .add_system(0, Frames(Arc::clone(&frames)));
+
+        // Driven the way the event loop does it: a snapshot of the systems,
+        // taken so the world and its manager are free while they run.
+        let systems = world.read().unwrap().systems();
+        systems.init(Arc::clone(&world)).unwrap();
+        systems
+            .update(Control::new(Event::AboutToWait), Arc::clone(&world))
+            .unwrap();
+
+        assert_eq!(frames.load(Ordering::Relaxed), 1);
+        assert_eq!(world.read().unwrap().sm.read().unwrap().system_count(), 1);
     }
 
     #[test]

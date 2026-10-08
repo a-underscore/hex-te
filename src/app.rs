@@ -4,7 +4,7 @@ use nalgebra::Vector3;
 
 use crate::control::Control;
 use crate::id::Id;
-use crate::world::{System, SystemManager, World};
+use crate::world::{System, World};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -33,12 +33,11 @@ pub(crate) enum UserEvent {
 /// The terminal application.
 ///
 /// Everything it needs lives in a [`World`]: `Gpu`, `Font`, `Terminal` and `Pty`
-/// are components of one entity, and the behaviour is a [`System`] that borrows
-/// them out of the world as it runs. `App` itself is only the winit glue that
-/// turns events into [`Control`] values.
+/// are components of one entity, and the behaviour is a [`System`] in the
+/// world's own manager that borrows them as it runs. `App` itself is only the
+/// winit glue that turns events into [`Control`] values.
 pub(crate) struct App {
-    world: Arc<RwLock<World>>,
-    systems: SystemManager<UserEvent>,
+    world: Arc<RwLock<World<UserEvent>>>,
     entity: Id,
 }
 
@@ -46,7 +45,7 @@ impl App {
     pub fn new(proxy: EventLoopProxy<UserEvent>) -> anyhow::Result<Self> {
         // The engine's world also carries the ambient lighting values the 3D
         // renderer reads; a terminal has no lights, so they stay at zero.
-        let world = World::new(Vector3::zeros(), 0.0);
+        let world = World::<UserEvent>::new(Vector3::zeros(), 0.0);
         let entity = world.read().unwrap().spawn(true);
 
         {
@@ -63,28 +62,35 @@ impl App {
         }
 
         // Read before the window exists, because the config sizes it; this is
-        // also what writes the documented default file on first run.
-        world.read().unwrap().attach_value(entity, Config::load());
+        // also what writes the documented default file on first run. It is
+        // loaded outside the `read` guard on purpose: the config is handed the
+        // world, and a `config.py` that touched it would deadlock against a
+        // guard held here.
+        let config = Config::load(Arc::clone(&world));
 
-        let mut systems = SystemManager::new();
-        systems.add(0, TerminalSystem::new(entity, proxy));
+        world.read().unwrap().attach_value(entity, config);
 
-        Ok(Self {
-            world,
-            systems,
-            entity,
-        })
+        // The behaviour lives in the world too, which leaves `App` as nothing
+        // but the winit glue around it.
+        world
+            .read()
+            .unwrap()
+            .add_system(0, TerminalSystem::new(entity, proxy));
+
+        Ok(Self { world, entity })
     }
 
-    /// Runs one event through the systems, stopping the loop if a system asked
-    /// for it by setting [`Control::exit`].
+    /// Runs one event through the world's systems, stopping the loop if a
+    /// system asked for it by setting [`Control::exit`].
     fn dispatch(&mut self, event_loop: &ActiveEventLoop, event: Event<UserEvent>) {
         let control = Control::new(event);
+        let world = Arc::clone(&self.world);
 
-        if let Err(error) = self
-            .systems
-            .update(Arc::clone(&control), Arc::clone(&self.world))
-        {
+        // A snapshot of the systems, taken out of the world's own lock: the
+        // systems are free to reach back into the world while they run.
+        let systems = world.read().unwrap().systems();
+
+        if let Err(error) = systems.update(Arc::clone(&control), world) {
             eprintln!("{WINDOW_TITLE}: {error:#}");
         }
 
@@ -128,26 +134,26 @@ impl TerminalSystem {
         }
     }
 
-    fn gpu(&self, world: &World) -> Option<Arc<RwLock<Gpu>>> {
+    fn gpu(&self, world: &World<UserEvent>) -> Option<Arc<RwLock<Gpu>>> {
         world.component::<Gpu>(self.entity)
     }
 
-    fn terminal(&self, world: &World) -> Option<Arc<RwLock<Terminal>>> {
+    fn terminal(&self, world: &World<UserEvent>) -> Option<Arc<RwLock<Terminal>>> {
         world.component::<Terminal>(self.entity)
     }
 
-    fn pty(&self, world: &World) -> Option<Arc<RwLock<Pty>>> {
+    fn pty(&self, world: &World<UserEvent>) -> Option<Arc<RwLock<Pty>>> {
         world.component::<Pty>(self.entity)
     }
 
-    fn request_redraw(&self, world: &World) {
+    fn request_redraw(&self, world: &World<UserEvent>) {
         if let Some(gpu) = self.gpu(world) {
             gpu.read().unwrap().request_redraw();
         }
     }
 
     /// Hands everything the reader thread collected to the VT parser.
-    fn pump(&self, world: &World) {
+    fn pump(&self, world: &World<UserEvent>) {
         let Ok(mut pending) = self.pending.lock() else {
             return;
         };
@@ -159,7 +165,7 @@ impl TerminalSystem {
         }
     }
 
-    fn redraw(&self, world: &World) {
+    fn redraw(&self, world: &World<UserEvent>) {
         self.pump(world);
 
         let (Some(gpu), Some(terminal)) = (self.gpu(world), self.terminal(world)) else {
@@ -180,7 +186,7 @@ impl TerminalSystem {
     }
 
     /// Handles one window event, returning true when the loop should stop.
-    fn window_event(&mut self, event: &WindowEvent, world: &World) -> bool {
+    fn window_event(&mut self, event: &WindowEvent, world: &World<UserEvent>) -> bool {
         match event {
             WindowEvent::CloseRequested => return true,
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
@@ -212,7 +218,7 @@ impl TerminalSystem {
 }
 
 impl System<UserEvent> for TerminalSystem {
-    fn init(&mut self, world: Arc<RwLock<World>>) -> anyhow::Result<()> {
+    fn init(&mut self, world: Arc<RwLock<World<UserEvent>>>) -> anyhow::Result<()> {
         let world = world.read().unwrap();
 
         let config = world
@@ -247,7 +253,7 @@ impl System<UserEvent> for TerminalSystem {
     fn update(
         &mut self,
         control: Arc<RwLock<Control<UserEvent>>>,
-        world: Arc<RwLock<World>>,
+        world: Arc<RwLock<World<UserEvent>>>,
     ) -> anyhow::Result<()> {
         let mut exit = false;
 
@@ -310,7 +316,9 @@ impl ApplicationHandler<UserEvent> for App {
 
         // The window has to exist before the rest of the app can be built, so
         // the systems are initialised here rather than in `App::new`.
-        if let Err(error) = self.systems.init(Arc::clone(&self.world)) {
+        let systems = self.world.read().unwrap().systems();
+
+        if let Err(error) = systems.init(Arc::clone(&self.world)) {
             eprintln!("{WINDOW_TITLE}: {error:#}");
             event_loop.exit();
         }

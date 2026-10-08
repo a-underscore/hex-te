@@ -8,18 +8,35 @@ use crate::world::World;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 /// Ordered groups of [`System`]s, one pipeline per id.
 ///
-/// `hex` ran every pipeline on a thread pool owned by its `Context`, which is
-/// why each system sat behind its own `Arc<RwLock<_>>`. There is no context
-/// here yet, so the systems run one after another on the calling thread and the
-/// extra indirection would only be overhead; reintroducing a pool changes this
-/// struct's internals, not its API.
+/// Every system sits behind its own handle rather than in a plain `Box`, which
+/// is what `hex` did for its thread pool: it makes the manager cheap to clone,
+/// so a caller can take a snapshot and run the systems *without* holding the
+/// manager's lock. A system that reaches back into the manager — a Python one
+/// usually does — then works instead of deadlocking on its own lock. There is
+/// no thread pool here yet, so the systems run one after another on the calling
+/// thread.
 pub struct SystemManager<E: 'static = ()> {
-    pipelines: HashMap<Id, Vec<Box<dyn System<E>>>>,
+    pipelines: HashMap<Id, Pipeline<E>>,
+}
+
+/// The systems of one pipeline, in the order they were added.
+type Pipeline<E> = Vec<Arc<Mutex<Box<dyn System<E>>>>>;
+
+/// Cloning the manager clones the handles, not the systems: the copy runs the
+/// same behaviour, but needs none of the manager's own lock to do it.
+///
+/// Written by hand because a derived `Clone` would demand `E: Clone`.
+impl<E: 'static> Clone for SystemManager<E> {
+    fn clone(&self) -> Self {
+        Self {
+            pipelines: self.pipelines.clone(),
+        }
+    }
 }
 
 impl<E: 'static> Default for SystemManager<E> {
@@ -36,7 +53,10 @@ impl<E: 'static> SystemManager<E> {
     }
 
     pub fn add_gen(&mut self, pid: Id, s: Box<dyn System<E>>) {
-        self.pipelines.entry(pid).or_default().push(s);
+        self.pipelines
+            .entry(pid)
+            .or_default()
+            .push(Arc::new(Mutex::new(s)));
     }
 
     pub fn add<S: System<E>>(&mut self, pid: Id, s: S) {
@@ -49,28 +69,42 @@ impl<E: 'static> SystemManager<E> {
         }
     }
 
-    pub fn init(&mut self, world: Arc<RwLock<World>>) -> anyhow::Result<()> {
-        for pipeline in self.pipelines.values_mut() {
-            for system in pipeline.iter_mut() {
-                system.init(Arc::clone(&world))?;
-            }
+    /// How many systems are registered, across every pipeline.
+    pub fn system_count(&self) -> usize {
+        self.pipelines.values().map(Vec::len).sum()
+    }
+
+    /// Runs every system's `init`, in snapshot order.
+    pub fn init(&self, world: Arc<RwLock<World<E>>>) -> anyhow::Result<()> {
+        for system in self.snapshot() {
+            system.lock().unwrap().init(Arc::clone(&world))?;
         }
 
         Ok(())
     }
 
+    /// Runs every system's `update`, in snapshot order.
     pub fn update(
-        &mut self,
+        &self,
         control: Arc<RwLock<Control<E>>>,
-        world: Arc<RwLock<World>>,
+        world: Arc<RwLock<World<E>>>,
     ) -> anyhow::Result<()> {
-        for pipeline in self.pipelines.values_mut() {
-            for system in pipeline.iter_mut() {
-                system.update(Arc::clone(&control), Arc::clone(&world))?;
-            }
+        for system in self.snapshot() {
+            system
+                .lock()
+                .unwrap()
+                .update(Arc::clone(&control), Arc::clone(&world))?;
         }
 
         Ok(())
+    }
+
+    /// Handles to the systems of every pipeline, ready to run.
+    ///
+    /// The pipelines are walked in an unspecified order; the systems of one
+    /// pipeline run in the order they were added.
+    fn snapshot(&self) -> Vec<Arc<Mutex<Box<dyn System<E>>>>> {
+        self.pipelines.values().flatten().cloned().collect()
     }
 }
 

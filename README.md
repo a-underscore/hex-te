@@ -27,7 +27,9 @@ cargo test  # terminal, engine and shader tests
 - Closes the window when the shell exits.
 - Holds its own resources — the GPU, the font, the grid and the shell — as
   components of one entity in an entity-component world, and handles events in a
-  system that borrows them from the world.
+  system that borrows them back out of that world.
+- Lets the config file add systems of its own, so Python can shape the running
+  app rather than only fill in settings.
 
 Not implemented yet: SGR colours and attributes, wide (CJK) double-width cells,
 scrollback, the alternate screen, mouse reporting, and text selection.
@@ -36,11 +38,12 @@ scrollback, the alternate screen, mouse reporting, and text selection.
 
 On first run the app writes a `config.py` into the config directory —
 `$XDG_CONFIG_HOME/hex-te/config.py`, or `~/.config/hex-te/config.py` when
-`XDG_CONFIG_HOME` is unset — and reads it back with an embedded Python
-interpreter (`pyo3`). Nothing in it is required: a name that is missing or of the
-wrong type keeps the default the file documents, and a file that cannot be
-evaluated is reported while the defaults are used, so a broken config cannot stop
-the terminal starting.
+`XDG_CONFIG_HOME` is unset — and evaluates it with an embedded Python interpreter
+(`pyo3`), so the file is Python and a value can be computed rather than written
+out; a file that cannot be evaluated is reported instead of stopping the
+terminal.
+
+These are the names the file documents:
 
 | Setting | Meaning |
 | --- | --- |
@@ -49,16 +52,39 @@ the terminal starting.
 | `shell` | Program to run inside the pty; `None` means `$SHELL` |
 | `background`, `cursor_color` | Colours, as `(r, g, b)` floats in `0.0..=1.0` |
 
-Because the file is Python, a setting can be computed rather than written out:
+Reading those settings back is not wired up right now: the loader evaluates the
+file for its effect on `world` (below), so the names above are documented but not
+yet applied. The file is read once, when the app starts, so restart it to pick up
+an edit; a window manager is free to override the requested window size.
+
+### The world
+
+The file is also handed the application's `world`, so a config can shape the
+running app rather than only fill in settings:
+
+| Call | Meaning |
+| --- | --- |
+| `world.spawn(active=True)` | Adds an entity, returning its id |
+| `world.despawn(entity)` | Removes an entity and its components |
+| `world.entities()`, `world.entity_count()` | The active entities, and how many there are |
+| `world.add_system(fn, pipeline=0)` | Registers `fn(world)`, called once per event |
+| `world.remove_system(pipeline=0)` | Drops the most recently added system |
+| `world.system_count()` | How many systems are registered |
+| `world.ambient_color`, `world.ambient_intensity` | The 3D lighting base values |
+
+It is the same object the engine runs on, not a copy, so anything it changes is
+visible to the app immediately. A system is an ordinary function taking the
+world, and it may touch the world it is given:
 
 ```python
-import math
+def dim(world):
+    world.ambient_intensity = min(1.0, world.ambient_intensity + 0.01)
 
-font_size = math.floor(15.7)
+world.add_system(dim)
 ```
 
-The file is read once, when the app starts, so restart it to pick up an edit. A
-window manager is free to override the requested window size.
+Systems run on the event loop's thread, once per event the app dispatches. A
+system added while they run joins the next event, not the one in progress.
 
 ## Structure
 
@@ -95,11 +121,17 @@ of the world instead of storing them. `World::spawn`, `attach`, `attach_value`,
 `component` and friends exist so callers pass a world rather than an entity
 manager plus every component.
 
+The world holds its systems as well as its entities — `World::add_system` and
+`World::systems` — so `App` is only the winit glue that hands each event to them.
+Each system sits behind its own handle and the manager is cloned out before the
+systems run, which is what lets one borrow the world back as it runs; the Python
+systems registered from the config file do exactly that.
+
 | Module | Notes |
 | --- | --- |
-| `world::World` | Entity-component store plus the global ambient lighting values |
+| `world::World` | Entity and system managers, plus the global ambient lighting values |
 | `world::{EntityManager, ComponentManager}` | Type-erased component storage behind `Arc<RwLock<C>>` |
-| `world::{System, SystemManager}` | `init`/`update` units of behaviour, run in registration order |
+| `world::{System, SystemManager}` | `init`/`update` units of behaviour, added in order and run from a snapshot |
 | `control::Control` | The winit event plus an `exit` flag; a system sets `exit` to stop the loop |
 | `components` | The engine's own components, so far unused by the terminal: `Camera3`, `Trans3`, `Tag` |
 

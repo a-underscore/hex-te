@@ -14,14 +14,14 @@ use std::sync::{Arc, RwLock};
 /// to be reachable through the world, so it receives just the event
 /// ([`Control`]) and the world.
 pub trait System<E: 'static = ()>: Send + Sync + 'static {
-    fn init(&mut self, _world: Arc<RwLock<World>>) -> anyhow::Result<()> {
+    fn init(&mut self, _world: Arc<RwLock<World<E>>>) -> anyhow::Result<()> {
         Ok(())
     }
 
     fn update(
         &mut self,
         _control: Arc<RwLock<Control<E>>>,
-        _world: Arc<RwLock<World>>,
+        _world: Arc<RwLock<World<E>>>,
     ) -> anyhow::Result<()> {
         Ok(())
     }
