@@ -10,27 +10,38 @@ cargo test
 
 ## Current behavior
 
-- Opens a window and rasterizes typed text with a system monospace font.
-- Supports basic buffer editing with Backspace, Delete, arrows, Home, End,
-  Enter, and Tab.
-- Recalculates the number of character cells from the window dimensions and
-  font metrics when it redraws.
-- Draws the text texture and a grid-positioned cursor with a WGSL shader.
+- Spawns `$SHELL` on a PTY and renders what it prints: this is a shell-connected
+  terminal emulator, not just a text widget.
+- Parses the shell's byte stream with a VT state machine (`vte`) into a character
+  grid: `CR`, `LF`, `BS`, `TAB`, erasing, cursor movement, and scrolling all work.
+- Forwards keystrokes to the shell: arrows, Home/End, Insert/Delete, PageUp/Down,
+  `Ctrl`+letter as control codes, and `Alt`+key as an `ESC` prefix.
+- The shell's own echo is the only thing drawn, so there is no double echo and
+  the screen always agrees with the shell's idea of the current line.
+- Reads from the PTY happen on a dedicated thread that wakes the event loop
+  through a user event, so a quiet shell never blocks the UI.
+- Resizes the PTY (`SIGWINCH`) to match the grid, and recomputes the grid from the
+  window dimensions and font metrics on every redraw.
+- Closes the window when the shell exits.
 
-The shell and PTY helper exist, but PTY input/output is not yet connected to the
-displayed text buffer. The current keyboard input edits an in-memory buffer;
-this is not yet a shell-connected terminal emulator.
+Not implemented yet: SGR colours and attributes, wide (CJK) double-width cells,
+scrollback, the alternate screen, mouse reporting, and text selection.
 
 ## Structure
 
 | File | Responsibility |
 | --- | --- |
-| `src/main.rs` | Creates the event loop and application |
-| `src/app.rs` | Owns the window, handles input and redraw events |
-| `src/terminal.rs` | Loads the font, edits the text buffer, computes the grid, and rasterizes glyphs |
+| `src/main.rs` | Creates the event loop, its user-event channel, and the application |
+| `src/app.rs` | Owns the window, PTY, and grid; dispatches input, output, and redraw events |
+| `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
+| `src/terminal.rs` | The VT parser and character grid, key encoding, and glyph rasterization |
 | `src/gpu.rs` | Configures the surface and renders the texture and cursor |
-| `src/pty.rs` | Creates a PTY and starts the configured shell; not yet wired to the display |
 | `src/shaders/screen.wgsl` | Draws the screen texture and cursor overlay |
+
+Data flows one way around the loop: keystrokes are encoded and written to the PTY,
+the shell echoes and prints, the reader thread collects the bytes and wakes the
+event loop, and the VT parser turns them into grid cells that `rasterize` uploads
+as a texture.
 
 ## Requirements
 
@@ -38,5 +49,5 @@ this is not yet a shell-connected terminal emulator.
 - A GPU driver supported by `wgpu`.
 - An installed monospace font, discovered through the system font database.
 
-`cargo test` validates the shader without requiring a GPU. The text-rasterization
-tests also need a system monospace font.
+`cargo test` validates the shader and the VT grid without needing a GPU or a PTY.
+The tests that rasterize glyphs also need a system monospace font.
