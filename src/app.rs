@@ -227,7 +227,7 @@ impl System<UserEvent> for TerminalSystem {
             .unwrap_or_default();
 
         let font = world.attach_value(self.entity, Font::load(config.font_size)?);
-        world.attach_value(self.entity, Terminal::new(font));
+        world.attach_value(self.entity, Terminal::new(font, config.background));
 
         // Reads from the pty block, so they happen on the reader thread and the
         // result is handed to the event loop as a user event.

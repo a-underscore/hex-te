@@ -321,7 +321,12 @@ impl Gpu {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: self.screen.background[0] as f64,
+                            g: self.screen.background[1] as f64,
+                            b: self.screen.background[2] as f64,
+                            a: self.screen.background[3] as f64,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

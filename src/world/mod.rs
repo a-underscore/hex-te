@@ -11,13 +11,11 @@ use std::sync::{Arc, RwLock};
 
 use nalgebra::Vector3;
 
-use crate::components::{Camera3, Tag, Trans3};
 use crate::id::Id;
 
 /// Shared world state. The [`EntityManager`] holds every entity and its
 /// components, the [`SystemManager`] the behaviour that runs over them, and the
-/// ambient fields feed the 3D lighting pass so scenes are never fully black
-/// outside direct light.
+/// ambient fields are the global lighting values a renderer starts from.
 ///
 /// `E` is the application's winit user event — the same one [`Control`] carries
 /// — so a system can be written against the events its app produces. The
@@ -30,8 +28,7 @@ pub struct World<E: 'static = ()> {
 }
 
 impl<E: 'static> World<E> {
-    /// Builds a world with empty entity and system managers, with the engine's
-    /// component managers already registered.
+    /// Builds a world with an empty entity and system manager.
     pub fn new(ambient_color: Vector3<f32>, ambient_intensity: f32) -> Arc<RwLock<Self>> {
         Self::from_manager(
             EntityManager::new(),
@@ -43,25 +40,14 @@ impl<E: 'static> World<E> {
 
     /// Like [`World::new`], but over the managers you already have.
     ///
-    /// This is `hex`'s `World::new` signature: the ambient values are the only
-    /// part of a world that does not already live in a manager.
+    /// The ambient values are the only part of a world that does not already
+    /// live in a manager.
     pub fn from_manager(
         em: Arc<RwLock<EntityManager>>,
         sm: SystemManager<E>,
         ambient_color: Vector3<f32>,
         ambient_intensity: f32,
     ) -> Arc<RwLock<Self>> {
-        {
-            let mut em = em.write().unwrap();
-
-            // Registering up front leaves the component map holding a manager
-            // for every engine component type, rather than creating them as a
-            // side effect of the first `attach`.
-            em.register::<Camera3>();
-            em.register::<Tag>();
-            em.register::<Trans3>();
-        }
-
         Arc::new(RwLock::new(Self {
             em,
             sm: Arc::new(RwLock::new(sm)),
@@ -103,9 +89,9 @@ impl<E: 'static> World<E> {
 
     /// Attaches a component to an entity.
     ///
-    /// Components the engine builds already come as `Arc<RwLock<C>>` (see
-    /// [`Trans3::new`]), so this is the only place that has to reach into the
-    /// component managers: callers hold a world and nothing else.
+    /// The handle is what the rest of the code uses to reach the component, so
+    /// this is the only place that has to reach into the component managers:
+    /// callers hold a world and nothing else.
     pub fn attach<C: Send + Sync + 'static>(&self, eid: Id, component: Arc<RwLock<C>>) {
         self.em.write().unwrap().add_component(eid, component);
     }
@@ -128,20 +114,18 @@ impl<E: 'static> World<E> {
     /// A shared handle to an entity's component of type `C`.
     ///
     /// The handle outlives the world's own lock, which is what lets two
-    /// components be borrowed mutably at the same time:
+    /// components be borrowed mutably at the same time. Given a component type
+    /// `Position`, say:
     ///
-    /// ```
-    /// # use hex_te::components::Trans3;
-    /// # use hex_te::nalgebra::Vector3;
-    /// # use hex_te::World;
+    /// ```ignore
     /// let world = World::new(Vector3::zeros(), 0.0);
     /// let world = world.read().unwrap();
     ///
     /// let eid = world.spawn(true);
-    /// world.attach(eid, Trans3::new(Vector3::zeros(), Vector3::zeros(), Vector3::new(1.0, 1.0, 1.0)));
+    /// world.attach_value(eid, Position([0.0, 0.0, 0.0]));
     ///
-    /// let transform = world.component::<Trans3>(eid).expect("transform");
-    /// transform.write().unwrap().position = Vector3::new(0.0, 1.0, 0.0);
+    /// let position = world.component::<Position>(eid).expect("position");
+    /// position.write().unwrap().0 = [0.0, 1.0, 0.0];
     /// ```
     pub fn component<C: Send + Sync + 'static>(&self, eid: Id) -> Option<Arc<RwLock<C>>> {
         self.em.read().unwrap().get_component::<C>(eid)
@@ -154,9 +138,8 @@ impl<E: 'static> World<E> {
 
     /// The ambient values in the layout the lighting shader declares.
     ///
-    /// In `hex` these two fields were copied into a Vulkano descriptor subbuffer
-    /// every frame; wgpu instead wants a `bytemuck::Pod` value it can hand to
-    /// `Queue::write_buffer`, which is what this returns.
+    /// The result is `bytemuck::Pod`, so it can be written straight into a
+    /// uniform buffer with `Queue::write_buffer`.
     pub fn ambient_uniform(&self) -> AmbientUniform {
         AmbientUniform {
             color: self.ambient_color.into(),
@@ -177,7 +160,6 @@ pub struct AmbientUniform {
 #[cfg(test)]
 mod tests {
     use super::{AmbientUniform, System, World};
-    use crate::components::{Camera3, Tag, Trans3};
     use crate::control::Control;
     use nalgebra::Vector3;
     use winit::event::Event;
@@ -188,6 +170,10 @@ mod tests {
     fn world() -> Arc<RwLock<World>> {
         World::new(Vector3::zeros(), 0.0)
     }
+
+    /// A component type of the tests' own: the world stores any `Send + Sync`
+    /// value, so nothing else has to exist for these to mean something.
+    struct Marker(u32);
 
     /// Counts the frames it has been updated for.
     struct Frames(Arc<AtomicUsize>);
@@ -221,32 +207,20 @@ mod tests {
     }
 
     #[test]
-    fn the_engine_component_managers_are_registered_up_front() {
-        let world = world();
-        let em = world.read().unwrap();
-        let em = em.em.read().unwrap();
-
-        assert!(em.get_component_manager::<Camera3>().is_some());
-        assert!(em.get_component_manager::<Tag>().is_some());
-        assert!(em.get_component_manager::<Trans3>().is_some());
-    }
-
-    #[test]
     fn components_are_attached_and_fetched_through_the_world() {
         let world = world();
         let world = world.read().unwrap();
 
         let eid = world.spawn(true);
-        let scale = Vector3::new(1.0, 2.0, 3.0);
-        world.attach(eid, Trans3::new(Vector3::zeros(), Vector3::zeros(), scale));
+        let marker = world.attach_value(eid, Marker(1));
 
-        let transform = world.component::<Trans3>(eid).expect("transform");
-        assert_eq!(transform.read().unwrap().scale, scale);
+        assert_eq!(marker.read().unwrap().0, 1);
         assert_eq!(world.entities(), vec![eid]);
+        assert!(world.component::<Marker>(eid).is_some());
 
-        world.detach::<Trans3>(eid);
+        world.detach::<Marker>(eid);
 
-        assert!(world.component::<Trans3>(eid).is_none());
+        assert!(world.component::<Marker>(eid).is_none());
     }
 
     #[test]
@@ -277,11 +251,11 @@ mod tests {
         let world = world.read().unwrap();
 
         let eid = world.spawn(true);
-        world.attach(eid, Tag::new("player"));
+        world.attach_value(eid, Marker(1));
 
         world.despawn(eid);
 
         assert!(world.entities().is_empty());
-        assert!(world.component::<Tag>(eid).is_none());
+        assert!(world.component::<Marker>(eid).is_none());
     }
 }

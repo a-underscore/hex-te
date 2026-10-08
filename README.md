@@ -1,12 +1,10 @@
 # hex-te
 
-A GPU-rendered terminal emulator written in Rust with `winit` and `wgpu`, which
-also hosts the engine core being ported from the Vulkano project in `../hex` (see
-[Engine core](#engine-core-ported-from-hex)).
+A GPU-rendered terminal emulator in Rust, built on `winit` and `wgpu`.
 
 ```sh
 cargo run   # the terminal
-cargo test  # terminal, engine and shader tests
+cargo test  # unit and shader tests
 ```
 
 ## Current behavior
@@ -16,6 +14,10 @@ cargo test  # terminal, engine and shader tests
   text widget.
 - Parses the shell's byte stream with a VT state machine (`vte`) into a character
   grid: `CR`, `LF`, `BS`, `TAB`, erasing, cursor movement, and scrolling all work.
+- Paints colour the way the shell asks for it: the 16 ANSI colours, the
+  256-colour cube and its greys, and 24-bit truecolour, for foreground and
+  background, with bold, dim, hidden, inverse, underline and strikethrough
+  resolved as each cell is drawn.
 - Forwards keystrokes to the shell: arrows, Home/End, Insert/Delete, PageUp/Down,
   `Ctrl`+letter as control codes, and `Alt`+key as an `ESC` prefix.
 - The shell's own echo is the only thing drawn, so there is no double echo and
@@ -31,8 +33,10 @@ cargo test  # terminal, engine and shader tests
 - Lets the config file add systems of its own, so Python can shape the running
   app rather than only fill in settings.
 
-Not implemented yet: SGR colours and attributes, wide (CJK) double-width cells,
-scrollback, the alternate screen, mouse reporting, and text selection.
+Not implemented yet: italic, blink and a distinct bold face (those attributes
+are parsed, but the loaded font has a single face), styled or coloured
+underlines, wide (CJK) double-width cells, scrollback, the alternate screen,
+mouse reporting, and text selection.
 
 ## Configuration
 
@@ -70,11 +74,11 @@ running app rather than only fill in settings:
 | `world.add_system(fn, pipeline=0)` | Registers `fn(world)`, called once per event |
 | `world.remove_system(pipeline=0)` | Drops the most recently added system |
 | `world.system_count()` | How many systems are registered |
-| `world.ambient_color`, `world.ambient_intensity` | The 3D lighting base values |
+| `world.ambient_color`, `world.ambient_intensity` | The global lighting base values |
 
-It is the same object the engine runs on, not a copy, so anything it changes is
-visible to the app immediately. A system is an ordinary function taking the
-world, and it may touch the world it is given:
+It is the same object the app runs on, not a copy, so anything it changes is
+visible immediately. A system is an ordinary function taking the world, and it
+may touch the world it is given:
 
 ```python
 def dim(world):
@@ -94,11 +98,10 @@ system added while they run joins the next event, not the one in progress.
 | `src/app.rs` | The winit glue: turns events into `Control` values and runs them through the systems |
 | `src/config.rs` | Writes and evaluates the Python `config.py` through `pyo3` |
 | `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
-| `src/terminal.rs` | The VT parser and character grid, key encoding, and glyph rasterization |
+| `src/terminal.rs` | The VT parser and character grid, key encoding, and the rasterizer that paints cells and glyphs into the screen texture |
 | `src/font.rs` | Loads the system monospace face and answers rasterization requests |
 | `src/gpu.rs` | Configures the surface and renders the texture and cursor |
-| `src/world/` | The ported engine: the entity/component store and the system manager |
-| `src/components/` | The ported 3D components: `Camera3`, `Trans3`, `Tag` |
+| `src/world/` | The entity-component world: the entity store, the system manager, and the ambient values |
 | `src/control.rs` | The event value a system is handed each turn, plus its `exit` flag |
 | `src/id.rs` | The `Id` entity handle |
 | `src/shaders/screen.wgsl` | Draws the screen texture and cursor overlay |
@@ -108,11 +111,10 @@ the shell echoes and prints, the reader thread collects the bytes and wakes the
 event loop, and the VT parser turns them into grid cells that `rasterize` uploads
 as a texture.
 
-## Engine core (ported from `hex`)
+## The world
 
-This is a single crate: the engine being ported from the Vulkano project in
-`../hex` lives in `src/world/` and `src/components/`, and the terminal's own
-resources are components of that same world.
+The app's resources and its behaviour share one entity-component world, in this
+same crate: there is no library target in between.
 
 The app owns exactly one entity, to which `Gpu`, `Font`, `Terminal` and `Pty` are
 attached. Its behaviour is a single `System` (`TerminalSystem` in `src/app.rs`)
@@ -133,19 +135,10 @@ systems registered from the config file do exactly that.
 | `world::{EntityManager, ComponentManager}` | Type-erased component storage behind `Arc<RwLock<C>>` |
 | `world::{System, SystemManager}` | `init`/`update` units of behaviour, added in order and run from a snapshot |
 | `control::Control` | The winit event plus an `exit` flag; a system sets `exit` to stop the loop |
-| `components` | The engine's own components, so far unused by the terminal: `Camera3`, `Trans3`, `Tag` |
 
-Two things are deliberately different from `hex` because the GPU API is: the
-ambient values are handed over as `world::AmbientUniform`, a padding-free
-`bytemuck::Pod` struct ready for `Queue::write_buffer` (the Vulkano original wrote
-a descriptor subbuffer), and camera projections get a depth-only clip-space
-correction, since wgpu's Y axis — unlike Vulkan's — already points up.
-
-`Light3`, `Model` and `hex`'s `renderables/` and `renderers/` are still Vulkano
-code and follow once the 3D renderer is ported.
-
-The port lives on the `dev` branch; `master` still tracks the terminal-only
-history.
+The ambient values reach a renderer as `world::AmbientUniform`: a padding-free
+`bytemuck::Pod` struct laid out for a `vec3` plus an `f32`, ready for
+`Queue::write_buffer`.
 
 ## Requirements
 
@@ -156,6 +149,6 @@ history.
   and `pyo3` embeds an interpreter to evaluate it. `pyo3` locates the interpreter
   through `python3` on `PATH` (or `PYO3_PYTHON`).
 
-`cargo test` covers the terminal and the engine, and validates the shader and the
-VT grid without needing a GPU or a PTY. The config tests need a Python
-interpreter, and the tests that rasterize glyphs need a system monospace font.
+`cargo test` covers the grid, the world and the config, and validates the shader
+without needing a GPU or a PTY. The config tests need a Python interpreter, and
+the tests that rasterize glyphs need a system monospace font.

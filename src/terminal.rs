@@ -14,6 +14,8 @@ pub(crate) struct Terminal {
     /// A handle to the font component rather than a copy of it: the grid asks it
     /// for advances and glyph bitmaps, and nothing else owns those settings.
     font: Arc<RwLock<Font>>,
+    /// The colours the grid is painted with.
+    palette: Palette,
     screen: Screen,
     parser: vte::Parser,
 }
@@ -21,7 +23,11 @@ pub(crate) struct Terminal {
 impl Terminal {
     /// `font` is expected to be the world's font component, so the grid and
     /// anything else drawing with the same face share one instance.
-    pub(crate) fn new(font: Arc<RwLock<Font>>) -> Self {
+    ///
+    /// `background` is the configured window colour: it becomes what
+    /// [`Color::Default`] resolves to behind a cell, so the window and the text
+    /// agree.
+    pub(crate) fn new(font: Arc<RwLock<Font>>, background: [f32; 4]) -> Self {
         let cursor_size = font.read().unwrap().cell();
 
         let mut terminal = Self {
@@ -35,6 +41,7 @@ impl Terminal {
             },
             texture: None,
             font,
+            palette: Palette::new(background),
             screen: Screen::default(),
             parser: vte::Parser::new(),
         };
@@ -130,8 +137,20 @@ impl Terminal {
         self.update_cursor_position();
     }
 
+    /// Paints the whole grid into an RGBA buffer, in the sRGB bytes the screen
+    /// texture stores.
+    ///
+    /// Every cell paints its own background, blank or not, so the shader has
+    /// nothing to add and an erased cell keeps the colour the shell asked for.
+    /// Glyph coverage is blended between that background and the cell's
+    /// foreground.
     fn rasterize(&self, w: usize, h: usize) -> Vec<u8> {
         let mut buffer = vec![0u8; w * h * 4];
+
+        for pixel in buffer.chunks_exact_mut(4) {
+            pixel[..3].copy_from_slice(&self.palette.background);
+            pixel[3] = 255;
+        }
 
         let (cols, rows) = self.size;
         let (cell_width, cell_height) = self.cursor_size;
@@ -144,52 +163,110 @@ impl Terminal {
             return buffer;
         };
 
+        let rule = ((cell_height / 12.0).round() as i32).max(1);
+
+        // A cell's edges are rounded once and shared with its neighbour, so the
+        // cells tile the texture exactly. Rounding each cell's own origin *and*
+        // size instead lets the two disagree by a pixel, which shows the window
+        // background as a line through every coloured region. The last edge is
+        // the texture's own edge, so the grid reaches the window and no strip of
+        // background is left along the right or bottom side.
+        let boundary = |index: usize, cells: usize, cell: f32, extent: usize| -> i32 {
+            if index == cells {
+                extent as i32
+            } else {
+                ((index as f32 * cell).round() as i32).min(extent as i32)
+            }
+        };
+
         for row in 0..rows {
+            let y = boundary(row, rows, cell_height, h);
+            let height = (boundary(row + 1, rows, cell_height, h) - y).max(1);
+
             for col in 0..cols {
-                let ch = self.screen.cell(row, col);
+                let cell = self.screen.cell(row, col);
+                let paint = self.palette.paint(cell);
+                let x = boundary(col, cols, cell_width, w);
+                let rect = Rect {
+                    x,
+                    y,
+                    width: (boundary(col + 1, cols, cell_width, w) - x).max(1),
+                    height,
+                };
 
-                // Blank cells are the common case: skip rasterizing them.
-                if ch == ' ' || ch == '\0' {
-                    continue;
+                fill_rect(&mut buffer, w, h, rect, paint.bg);
+
+                // Blank cells are the common case and have nothing on top of
+                // their background.
+                if cell.ch != ' ' {
+                    let (metrics, bitmap) = font.rasterize(cell.ch);
+
+                    if metrics.width > 0 && metrics.height > 0 {
+                        let baseline = row as f32 * cell_height + line.ascent;
+                        let left = (col as f32 * cell_width + metrics.xmin as f32).round() as i32;
+                        let top =
+                            (baseline - metrics.ymin as f32 - metrics.height as f32).round() as i32;
+
+                        for gy in 0..metrics.height {
+                            let y = top + gy as i32;
+
+                            if y < 0 || y >= h as i32 {
+                                continue;
+                            }
+
+                            for gx in 0..metrics.width {
+                                let x = left + gx as i32;
+
+                                if x < 0 || x >= w as i32 {
+                                    continue;
+                                }
+
+                                let coverage = bitmap[gy * metrics.width + gx];
+
+                                if coverage == 0 {
+                                    continue;
+                                }
+
+                                let pixel = (y as usize * w + x as usize) * 4;
+                                let blended = blend(paint.bg, paint.fg, coverage);
+
+                                buffer[pixel..pixel + 3].copy_from_slice(&blended);
+                            }
+                        }
+                    }
                 }
 
-                let (metrics, bitmap) = font.rasterize(ch);
+                // Underline and strikethrough are rules, not glyphs.
+                if cell.attrs.contains(Attrs::UNDERLINE) {
+                    let y = rect.y + rect.height - rule;
 
-                if metrics.width == 0 || metrics.height == 0 {
-                    continue;
+                    fill_rect(
+                        &mut buffer,
+                        w,
+                        h,
+                        Rect {
+                            y,
+                            height: rule,
+                            ..rect
+                        },
+                        paint.fg,
+                    );
                 }
 
-                let baseline = row as f32 * cell_height + line.ascent;
-                let left = (col as f32 * cell_width + metrics.xmin as f32).round() as i32;
-                let top = (baseline - metrics.ymin as f32 - metrics.height as f32).round() as i32;
+                if cell.attrs.contains(Attrs::STRIKE) {
+                    let y = rect.y + (rect.height - rule) / 2;
 
-                for gy in 0..metrics.height {
-                    let y = top + gy as i32;
-
-                    if y < 0 || y >= h as i32 {
-                        continue;
-                    }
-
-                    for gx in 0..metrics.width {
-                        let x = left + gx as i32;
-
-                        if x < 0 || x >= w as i32 {
-                            continue;
-                        }
-
-                        let coverage = bitmap[gy * metrics.width + gx];
-
-                        if coverage == 0 {
-                            continue;
-                        }
-
-                        let i = (y as usize * w + x as usize) * 4;
-
-                        buffer[i] = coverage;
-                        buffer[i + 1] = coverage;
-                        buffer[i + 2] = coverage;
-                        buffer[i + 3] = 255;
-                    }
+                    fill_rect(
+                        &mut buffer,
+                        w,
+                        h,
+                        Rect {
+                            y,
+                            height: rule,
+                            ..rect
+                        },
+                        paint.fg,
+                    );
                 }
             }
         }
@@ -198,17 +275,275 @@ impl Terminal {
     }
 }
 
-/// The character grid the VT parser draws into, plus the little state it needs
-/// (the cursor and a pending wrap).
+/// A colour a cell asks for, in the form the shell wrote it: the palette
+/// decides what either of the first two means.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Color {
+    #[default]
+    Default,
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+/// What `SGR` asked of a cell beyond its colours.
 ///
-/// Cells are plain `char`s on purpose: this is the smallest model that renders
-/// correct text. Attributes (colour, bold), wide glyphs, scrollback and the
-/// alternate screen are the next things to add.
+/// These are the requests, not their effect: bold is a flag even though it is
+/// drawn as a brighter colour, and inverse is a flag rather than the colours
+/// being swapped in place, so a later `SGR 27` can put them back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Attrs(u16);
+
+impl Attrs {
+    const BOLD: Self = Self(1 << 0);
+    const DIM: Self = Self(1 << 1);
+    const ITALIC: Self = Self(1 << 2);
+    const UNDERLINE: Self = Self(1 << 3);
+    const BLINK: Self = Self(1 << 4);
+    const INVERSE: Self = Self(1 << 5);
+    const HIDDEN: Self = Self(1 << 6);
+    const STRIKE: Self = Self(1 << 7);
+
+    fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+
+    fn remove(&mut self, other: Self) {
+        self.0 &= !other.0;
+    }
+}
+
+impl std::ops::BitOr for Attrs {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+/// One cell of the grid: the character, how to paint it, and the attributes
+/// that change the painting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Cell {
+    ch: char,
+    fg: Color,
+    bg: Color,
+    attrs: Attrs,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            ch: ' ',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attrs::default(),
+        }
+    }
+}
+
+/// The style the next printed character gets: the one thing `SGR` changes, and
+/// what `Cell` copies when a character arrives.
+#[derive(Clone, Copy, Default)]
+struct Pen {
+    fg: Color,
+    bg: Color,
+    attrs: Attrs,
+}
+
+impl Pen {
+    /// The cell a character printed in this style gets.
+    fn cell(&self, ch: char) -> Cell {
+        Cell {
+            ch,
+            fg: self.fg,
+            bg: self.bg,
+            attrs: self.attrs,
+        }
+    }
+}
+
+/// The xterm table, which is what a shell that was offered 256 colours expects
+/// to find. The dim entries double as the `SGR 1` versions of the first eight.
+const ANSI: [[u8; 3]; 16] = [
+    [0x28, 0x2c, 0x34],
+    [0xe0, 0x6c, 0x75],
+    [0x98, 0xc3, 0x79],
+    [0xe5, 0xc0, 0x7b],
+    [0x61, 0xaf, 0xef],
+    [0xc6, 0x78, 0xdd],
+    [0x56, 0xb6, 0xc2],
+    [0xab, 0xb2, 0xbf],
+    [0x5c, 0x63, 0x70],
+    [0xbe, 0x50, 0x46],
+    [0x7e, 0xc6, 0x6b],
+    [0xd1, 0x9a, 0x66],
+    [0x4d, 0x9b, 0xe0],
+    [0xb2, 0x6c, 0xc8],
+    [0x46, 0xa5, 0xb0],
+    [0xf2, 0xf4, 0xf8],
+];
+
+/// The colours a cell can ask for, held in the sRGB bytes the screen texture
+/// stores so that painting a cell is a copy rather than a conversion.
+struct Palette {
+    ansi: [[u8; 3]; 16],
+    foreground: [u8; 3],
+    background: [u8; 3],
+}
+
+impl Palette {
+    /// `background` is the window colour the config gives, in the linear floats
+    /// the shader used to work in; it is converted to sRGB once, here, so that
+    /// the window and the default cell background stay the same colour.
+    fn new(background: [f32; 4]) -> Self {
+        Self {
+            ansi: ANSI,
+            foreground: [0xdc, 0xdf, 0xe4],
+            background: srgb(background),
+        }
+    }
+
+    /// What to paint a cell with, once the palette and the attributes that
+    /// change colour have been applied.
+    fn paint(&self, cell: Cell) -> Paint {
+        let mut fg = self.resolve(cell.fg, self.foreground);
+        let mut bg = self.resolve(cell.bg, self.background);
+
+        // Bold brightens the eight base colours instead of asking for a bold
+        // face, which there is only one of.
+        if let Color::Indexed(index @ 0..=7) = cell.fg
+            && cell.attrs.contains(Attrs::BOLD)
+        {
+            fg = self.ansi[index as usize + 8];
+        }
+
+        if cell.attrs.contains(Attrs::DIM) {
+            fg = fg.map(|channel| (channel as f32 * 2.0 / 3.0) as u8);
+        }
+
+        if cell.attrs.contains(Attrs::HIDDEN) {
+            fg = bg;
+        }
+
+        if cell.attrs.contains(Attrs::INVERSE) {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+
+        Paint { fg, bg }
+    }
+
+    /// The colour a cell asked for, with `default` standing in for
+    /// [`Color::Default`] — the foreground on one side of a cell, the
+    /// background on the other.
+    fn resolve(&self, color: Color, default: [u8; 3]) -> [u8; 3] {
+        match color {
+            Color::Default => default,
+            Color::Indexed(index) => self.indexed(index),
+            Color::Rgb(r, g, b) => [r, g, b],
+        }
+    }
+
+    /// The 256-colour range: the sixteen entries above, then the 6x6x6 cube and
+    /// the greys that xterm stacked on top of them.
+    fn indexed(&self, index: u8) -> [u8; 3] {
+        let index = index as usize;
+
+        match index {
+            0..=15 => self.ansi[index],
+            16..=231 => {
+                let level = |stride: usize| -> u8 {
+                    match (index - 16) / stride % 6 {
+                        0 => 0,
+                        value => (55 + 40 * value) as u8,
+                    }
+                };
+
+                [level(36), level(6), level(1)]
+            }
+            _ => {
+                let grey = (8 + 10 * (index - 232)) as u8;
+
+                [grey, grey, grey]
+            }
+        }
+    }
+}
+
+/// A cell ready to draw.
+struct Paint {
+    fg: [u8; 3],
+    bg: [u8; 3],
+}
+
+/// The sRGB encoding of a linear `r, g, b` colour, in bytes.
+fn srgb(color: [f32; 4]) -> [u8; 3] {
+    let encode = |value: f32| -> u8 {
+        let value = value.clamp(0.0, 1.0);
+        let encoded = if value <= 0.003_130_8 {
+            12.92 * value
+        } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+        };
+
+        (encoded * 255.0).round() as u8
+    };
+
+    [encode(color[0]), encode(color[1]), encode(color[2])]
+}
+
+/// A rectangle of the screen texture, in pixels.
+#[derive(Clone, Copy)]
+struct Rect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+/// Fills `rect` with `color`, clipped to the buffer.
+fn fill_rect(buffer: &mut [u8], w: usize, h: usize, rect: Rect, color: [u8; 3]) {
+    let left = rect.x.clamp(0, w as i32);
+    let right = (rect.x + rect.width).clamp(0, w as i32);
+    let top = rect.y.clamp(0, h as i32);
+    let bottom = (rect.y + rect.height).clamp(0, h as i32);
+
+    for y in top..bottom {
+        for x in left..right {
+            let pixel = (y as usize * w + x as usize) * 4;
+
+            buffer[pixel..pixel + 3].copy_from_slice(&color);
+        }
+    }
+}
+
+/// `fg` over `bg` by `coverage`, in the sRGB bytes the texture holds. Blending
+/// there rather than in linear light is what the 8-bit texture does anyway, and
+/// what every terminal that draws text this way does.
+fn blend(bg: [u8; 3], fg: [u8; 3], coverage: u8) -> [u8; 3] {
+    let mix = |bg: u8, fg: u8| -> u8 {
+        let blended = bg as i32 + (fg as i32 - bg as i32) * coverage as i32 / 255;
+
+        blended.clamp(0, 255) as u8
+    };
+
+    [mix(bg[0], fg[0]), mix(bg[1], fg[1]), mix(bg[2], fg[2])]
+}
+
+/// The character grid the VT parser draws into, plus the little state it needs
+/// (the pen, the cursor and a pending wrap).
+///
+/// Wide glyphs, scrollback and the alternate screen are the next things to add.
 #[derive(Default)]
 struct Screen {
-    cells: Vec<char>,
+    cells: Vec<Cell>,
     cols: usize,
     rows: usize,
+    /// What `SGR` left behind: the style the next character is drawn with.
+    pen: Pen,
     /// (column, row)
     cursor: (usize, usize),
     /// Set once the cursor reaches the right margin. The wrap happens when the
@@ -218,17 +553,22 @@ struct Screen {
 }
 
 impl Screen {
-    const BLANK: char = ' ';
+    /// A blank cell in the current style. Erasing paints the background the
+    /// shell asked for, not the default one, which is what makes `SGR 41`
+    /// followed by `ED` fill the screen red.
+    fn blank(&self) -> Cell {
+        self.pen.cell(' ')
+    }
 
     fn cursor(&self) -> (usize, usize) {
         self.cursor
     }
 
-    fn cell(&self, row: usize, col: usize) -> char {
+    fn cell(&self, row: usize, col: usize) -> Cell {
         self.cells
             .get(row * self.cols + col)
             .copied()
-            .unwrap_or(Self::BLANK)
+            .unwrap_or_default()
     }
 
     fn resize(&mut self, cols: usize, rows: usize) {
@@ -236,7 +576,7 @@ impl Screen {
             return;
         }
 
-        let mut cells = vec![Self::BLANK; cols * rows];
+        let mut cells = vec![Cell::default(); cols * rows];
 
         for row in 0..rows.min(self.rows) {
             for col in 0..cols.min(self.cols) {
@@ -278,7 +618,7 @@ impl Screen {
         }
 
         let (col, row) = self.cursor;
-        self.cells[row * self.cols + col] = ch;
+        self.cells[row * self.cols + col] = self.pen.cell(ch);
 
         if col + 1 == self.cols {
             self.wrap_pending = true;
@@ -339,13 +679,15 @@ impl Screen {
             return;
         }
 
+        let blank = self.blank();
+
         if self.rows == 1 {
-            self.cells.fill(Self::BLANK);
+            self.cells.fill(blank);
             return;
         }
 
         self.cells.drain(..self.cols);
-        self.cells.resize(self.cols * self.rows, Self::BLANK);
+        self.cells.resize(self.cols * self.rows, blank);
     }
 
     fn scroll_down(&mut self) {
@@ -353,13 +695,15 @@ impl Screen {
             return;
         }
 
+        let blank = self.blank();
+
         if self.rows == 1 {
-            self.cells.fill(Self::BLANK);
+            self.cells.fill(blank);
             return;
         }
 
         self.cells.truncate(self.cols * (self.rows - 1));
-        self.cells.resize(self.cols * self.rows, Self::BLANK);
+        self.cells.resize(self.cols * self.rows, blank);
         self.cells.rotate_right(self.cols);
     }
 
@@ -368,12 +712,13 @@ impl Screen {
             return;
         }
 
+        let blank = self.blank();
         let index = self.cursor.1 * self.cols + self.cursor.0;
 
         match mode {
-            0 => self.cells[index..].fill(Self::BLANK),
-            1 => self.cells[..=index].fill(Self::BLANK),
-            _ => self.cells.fill(Self::BLANK),
+            0 => self.cells[index..].fill(blank),
+            1 => self.cells[..=index].fill(blank),
+            _ => self.cells.fill(blank),
         }
     }
 
@@ -382,18 +727,136 @@ impl Screen {
             return;
         }
 
+        let blank = self.blank();
         let start = self.cursor.1 * self.cols;
 
         match mode {
-            0 => self.cells[start + self.cursor.0..start + self.cols].fill(Self::BLANK),
-            1 => self.cells[start..=start + self.cursor.0].fill(Self::BLANK),
-            _ => self.cells[start..start + self.cols].fill(Self::BLANK),
+            0 => self.cells[start + self.cursor.0..start + self.cols].fill(blank),
+            1 => self.cells[start..=start + self.cursor.0].fill(blank),
+            _ => self.cells[start..start + self.cols].fill(blank),
+        }
+    }
+
+    /// `SGR`: changes the pen, and so everything printed after it.
+    fn sgr(&mut self, params: &Params) {
+        let groups: Vec<&[u16]> = params.iter().collect();
+
+        // `CSI m` on its own is `SGR 0`.
+        if groups.is_empty() {
+            self.pen = Pen::default();
+
+            return;
+        }
+
+        let mut index = 0;
+
+        while index < groups.len() {
+            let code = groups[index].first().copied().unwrap_or(0);
+            index += 1;
+
+            match code {
+                0 => self.pen = Pen::default(),
+                1 => self.pen.attrs.insert(Attrs::BOLD),
+                2 => self.pen.attrs.insert(Attrs::DIM),
+                3 => self.pen.attrs.insert(Attrs::ITALIC),
+                4 => self.pen.attrs.insert(Attrs::UNDERLINE),
+                5 => self.pen.attrs.insert(Attrs::BLINK),
+                7 => self.pen.attrs.insert(Attrs::INVERSE),
+                8 => self.pen.attrs.insert(Attrs::HIDDEN),
+                9 => self.pen.attrs.insert(Attrs::STRIKE),
+                // `22` is the only one that clears a pair.
+                22 => self.pen.attrs.remove(Attrs::BOLD | Attrs::DIM),
+                23 => self.pen.attrs.remove(Attrs::ITALIC),
+                24 => self.pen.attrs.remove(Attrs::UNDERLINE),
+                25 => self.pen.attrs.remove(Attrs::BLINK),
+                27 => self.pen.attrs.remove(Attrs::INVERSE),
+                28 => self.pen.attrs.remove(Attrs::HIDDEN),
+                29 => self.pen.attrs.remove(Attrs::STRIKE),
+                30..=37 => self.pen.fg = Color::Indexed((code - 30) as u8),
+                39 => self.pen.fg = Color::Default,
+                40..=47 => self.pen.bg = Color::Indexed((code - 40) as u8),
+                49 => self.pen.bg = Color::Default,
+                90..=97 => self.pen.fg = Color::Indexed((code - 90 + 8) as u8),
+                100..=107 => self.pen.bg = Color::Indexed((code - 100 + 8) as u8),
+                // `38`/`48` carry their colour in the parameters that follow.
+                38 | 48 => index += self.extended(&groups, index - 1),
+                _ => {}
+            }
+        }
+    }
+
+    /// `SGR 38`/`48`: a colour written as `38;5;n`, `38;2;r;g;b`, or the same
+    /// packed into the one `:` group. Returns how many further parameters it
+    /// used.
+    fn extended(&mut self, groups: &[&[u16]], at: usize) -> usize {
+        let group = groups[at];
+
+        // The `:` form keeps the whole colour in the code's own group, with the
+        // colour space — if the writer gave one — sitting before the channels.
+        if let [code, marker, rest @ ..] = group {
+            let color = match marker {
+                5 => rest.first().map(|&n| Color::Indexed(n as u8)),
+                2 if rest.len() >= 3 => {
+                    let channels = &rest[rest.len() - 3..];
+
+                    Some(Color::Rgb(
+                        channels[0] as u8,
+                        channels[1] as u8,
+                        channels[2] as u8,
+                    ))
+                }
+                _ => None,
+            };
+
+            self.set_color(*code, color);
+
+            return 0;
+        }
+
+        // The `;` form spreads them over the following parameters.
+        let value = |offset: usize| {
+            groups
+                .get(at + offset)
+                .and_then(|group| group.first().copied())
+        };
+
+        match value(1) {
+            Some(5) => {
+                self.set_color(group[0], value(2).map(|n| Color::Indexed(n as u8)));
+
+                2
+            }
+            Some(2) => {
+                let channel = |offset: usize| value(offset + 2).unwrap_or(0) as u8;
+
+                self.set_color(
+                    group[0],
+                    Some(Color::Rgb(channel(0), channel(1), channel(2))),
+                );
+
+                4
+            }
+            _ => 0,
+        }
+    }
+
+    /// `38` colours the foreground, `48` the background. A colour that could
+    /// not be read changes nothing.
+    fn set_color(&mut self, code: u16, color: Option<Color>) {
+        let Some(color) = color else {
+            return;
+        };
+
+        match code {
+            38 => self.pen.fg = color,
+            48 => self.pen.bg = color,
+            _ => {}
         }
     }
 
     #[cfg(test)]
     fn line(&self, row: usize) -> String {
-        (0..self.cols).map(|col| self.cell(row, col)).collect()
+        (0..self.cols).map(|col| self.cell(row, col).ch).collect()
     }
 }
 
@@ -445,8 +908,9 @@ impl Perform for Screen {
             'd' => self.place_cursor(self.cursor.0 as isize, param(params, 0, 1) as isize - 1),
             'J' => self.erase_display(param(params, 0, 0)),
             'K' => self.erase_line(param(params, 0, 0)),
-            // SGR (colour), mode set/reset and device status are ignored for
-            // now; they are consumed here so they never reach the grid as text.
+            'm' => self.sgr(params),
+            // Mode set/reset and device status are ignored for now; they are
+            // consumed here so they never reach the grid as text.
             _ => {}
         }
     }
@@ -481,6 +945,19 @@ fn param(params: &Params, index: usize, default: u16) -> u16 {
 /// or `None` when the key means nothing to the shell.
 pub(crate) fn encode_key(key: &Key, modifiers: ModifiersState) -> Option<Vec<u8>> {
     match key {
+        // Space is the one printable key winit names: X11 maps the keysym
+        // straight to `NamedKey::Space`, so it never reaches the `Character`
+        // arms below. What it sends is a character all the same, and `Ctrl` +
+        // space is the `NUL` every terminal sends for it.
+        Key::Named(NamedKey::Space) => {
+            let byte = if modifiers.control_key() {
+                control_code(' ')?
+            } else {
+                b' '
+            };
+
+            Some(with_alt(vec![byte], modifiers))
+        }
         Key::Named(named) => named_key(*named),
         Key::Character(text) if modifiers.control_key() => {
             let mut bytes = Vec::with_capacity(text.len());
@@ -545,7 +1022,7 @@ fn with_alt(mut bytes: Vec<u8>, modifiers: ModifiersState) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Font, Screen, Terminal, encode_key};
+    use super::{ANSI, Attrs, Color, Font, Screen, Terminal, encode_key};
     use std::sync::{Arc, RwLock};
     use vte::Parser;
     use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -554,7 +1031,7 @@ mod tests {
     fn terminal() -> Terminal {
         let font = Font::load(16.0).expect("a system monospace font");
 
-        Terminal::new(Arc::new(RwLock::new(font)))
+        Terminal::new(Arc::new(RwLock::new(font)), [0.05, 0.06, 0.08, 1.0])
     }
 
     /// Feeds `bytes` through a real VT parser into a fresh `cols` x `rows` grid.
@@ -614,6 +1091,35 @@ mod tests {
     }
 
     #[test]
+    fn the_space_bar_reaches_the_shell() {
+        // Space is a named key on X11, not `Character(" ")`.
+        assert_eq!(
+            encode_key(&Key::Named(NamedKey::Space), ModifiersState::empty()).as_deref(),
+            Some(b" ".as_slice())
+        );
+        assert_eq!(
+            encode_key(&Key::Named(NamedKey::Space), ModifiersState::SHIFT).as_deref(),
+            Some(b" ".as_slice())
+        );
+        assert_eq!(
+            encode_key(&Key::Character(" ".into()), ModifiersState::empty()).as_deref(),
+            Some(b" ".as_slice())
+        );
+    }
+
+    #[test]
+    fn control_and_alt_space_match_what_a_shell_expects() {
+        assert_eq!(
+            encode_key(&Key::Named(NamedKey::Space), ModifiersState::CONTROL).as_deref(),
+            Some(b"\x00".as_slice())
+        );
+        assert_eq!(
+            encode_key(&Key::Named(NamedKey::Space), ModifiersState::ALT).as_deref(),
+            Some(b"\x1b ".as_slice())
+        );
+    }
+
+    #[test]
     fn control_and_special_keys_match_what_a_shell_expects() {
         assert_eq!(
             encode_key(&Key::Character("c".into()), ModifiersState::CONTROL).as_deref(),
@@ -650,6 +1156,85 @@ mod tests {
         let pixels = terminal.rasterize(256, 64);
 
         assert!(pixels.chunks_exact(4).any(|pixel| pixel[0] != 0));
+    }
+
+    #[test]
+    fn sgr_leaves_the_pen_the_following_cells_are_drawn_with() {
+        let screen = screen(2, 1, b"\x1b[1;31;44mX\x1b[0mY");
+
+        assert_eq!(screen.cell(0, 0).fg, Color::Indexed(1));
+        assert_eq!(screen.cell(0, 0).bg, Color::Indexed(4));
+        assert!(screen.cell(0, 0).attrs.contains(Attrs::BOLD));
+
+        assert_eq!(screen.cell(0, 1).fg, Color::Default);
+        assert!(!screen.cell(0, 1).attrs.contains(Attrs::BOLD));
+    }
+
+    #[test]
+    fn bright_and_extended_colours_are_parsed() {
+        let screen = screen(2, 1, b"\x1b[91mX\x1b[38;5;196mY");
+
+        assert_eq!(screen.cell(0, 0).fg, Color::Indexed(9));
+        assert_eq!(screen.cell(0, 1).fg, Color::Indexed(196));
+    }
+
+    #[test]
+    fn a_true_colour_and_the_colon_form_agree() {
+        let screen = screen(2, 1, b"\x1b[38;2;10;20;30mX\x1b[48:2:1:2:3mY");
+
+        assert_eq!(screen.cell(0, 0).fg, Color::Rgb(10, 20, 30));
+        assert_eq!(screen.cell(0, 1).bg, Color::Rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn erasing_keeps_the_background_the_shell_asked_for() {
+        let screen = screen(4, 1, b"\x1b[41m\x1b[K");
+
+        for col in 0..4 {
+            assert_eq!(screen.cell(0, col).bg, Color::Indexed(1));
+        }
+    }
+
+    #[test]
+    fn the_default_background_reaches_the_pixels() {
+        let mut terminal = terminal();
+        terminal.update_grid_size(64, 32);
+
+        let pixels = terminal.rasterize(64, 32);
+
+        // What `0.05, 0.06, 0.08` encoded to when the shader added it by hand.
+        assert_eq!(&pixels[0..3], &[63, 69, 80]);
+    }
+
+    #[test]
+    fn a_coloured_background_reaches_the_pixels() {
+        let mut terminal = terminal();
+        terminal.update_grid_size(64, 32);
+        terminal.feed(b"\x1b[41m ");
+
+        let pixels = terminal.rasterize(64, 32);
+
+        assert_eq!(&pixels[0..3], &ANSI[1]);
+    }
+
+    #[test]
+    fn a_coloured_grid_has_no_background_showing_between_cells() {
+        let mut terminal = terminal();
+        // A window whose rows do not divide the height evenly is exactly the
+        // case that used to leave a 1px seam between rows.
+        let (w, h) = (256, 300);
+        terminal.update_grid_size(w, h);
+        terminal.feed(b"\x1b[41m\x1b[2J");
+
+        let pixels = terminal.rasterize(w, h);
+        let default_bg = [63, 69, 80];
+
+        let seams = pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[..3] == default_bg)
+            .count();
+
+        assert_eq!(seams, 0);
     }
 
     #[test]

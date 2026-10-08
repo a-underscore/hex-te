@@ -66,9 +66,10 @@ fn fs_screen(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let cell = cell_at(position.xy);
 
     // The texture covers the whole screen, so a pixel position maps straight
-    // onto a 0..1 UV.
+    // onto a 0..1 UV. It already holds the finished colours: the rasterizer
+    // paints every cell's background, so there is nothing to add here.
     let uv = position.xy / screen.resolution;
-    var color = textureSample(screen_tex, screen_sampler, uv).rgb + screen.background.rgb;
+    var color = textureSample(screen_tex, screen_sampler, uv).rgb;
 
     if (screen.cursor_visible != 0u && all(cell == screen.cursor)) {
         let local = position.xy - vec2<f32>(cell) * size;

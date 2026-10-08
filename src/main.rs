@@ -1,19 +1,14 @@
-//! A GPU-accelerated terminal emulator, plus the engine core being ported from
-//! the Vulkano project in `../hex`.
+//! A GPU-accelerated terminal emulator: a shell on a pty, a VT parser that turns
+//! its output into a character grid, and a wgpu renderer that draws the grid.
 //!
-//! The application is [`app::App`]; the engine is [`world`] (an entity-component
-//! store), [`components`] (the engine's own components) and [`control`] (the
-//! event value a system is handed each turn). The app's own resources —
-//! [`gpu::Gpu`], [`font::Font`], [`terminal::Terminal`] and [`pty::Pty`] — are
-//! components of that same world, which is why they all live in one crate
-//! instead of behind a library target.
+//! Everything the app needs lives in one entity-component [`world`]: [`gpu::Gpu`],
+//! [`font::Font`], [`terminal::Terminal`] and [`pty::Pty`] are components of one
+//! entity, and the behaviour is a system that borrows them back out of the world.
+//! [`control`] is the event value a system is handed each turn. Keeping them in
+//! one crate is what lets the resources and the behaviour share that world
+//! without a library target in between.
 
 mod app;
-// The engine core is ported ahead of what the terminal itself uses: the 3D
-// components, and the parts of the world API only the renderer will need, have
-// no caller yet. These allow-lists go away as that lands.
-#[allow(dead_code)]
-mod components;
 mod config;
 mod control;
 mod font;
@@ -21,6 +16,9 @@ mod gpu;
 mod id;
 mod pty;
 mod terminal;
+// The world carries a little more than the terminal uses today — the component
+// and system managers, and the ambient values a renderer will start from — so
+// its allow-list stays until the renderer claims the rest.
 #[allow(dead_code)]
 mod world;
 
