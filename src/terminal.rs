@@ -552,7 +552,7 @@ mod tests {
 
     /// A terminal over the system's monospace font, as the app builds it.
     fn terminal() -> Terminal {
-        let font = Font::load().expect("a system monospace font");
+        let font = Font::load(16.0).expect("a system monospace font");
 
         Terminal::new(Arc::new(RwLock::new(font)))
     }

@@ -26,12 +26,16 @@ pub(crate) struct Pty {
 }
 
 impl Pty {
-    /// Spawns `$SHELL` on a freshly allocated pty.
+    /// Spawns `$SHELL` — or `shell`, when the config names a program — on a
+    /// freshly allocated pty.
     ///
     /// `on_output` is called from a dedicated thread with each chunk the shell
     /// writes, and with `None` once it has exited. Reads from a pty block, so
     /// they must never happen on the event-loop thread.
-    pub fn new(mut on_output: impl FnMut(Option<&[u8]>) + Send + 'static) -> anyhow::Result<Self> {
+    pub fn new(
+        shell: Option<&str>,
+        mut on_output: impl FnMut(Option<&[u8]>) + Send + 'static,
+    ) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: INITIAL_ROWS,
@@ -40,7 +44,10 @@ impl Pty {
             pixel_height: 0,
         })?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let shell = shell
+            .map(str::to_string)
+            .or_else(|| std::env::var("SHELL").ok())
+            .unwrap_or_else(|| "/bin/sh".to_string());
         let child = pair.slave.spawn_command(CommandBuilder::new(shell))?;
 
         let mut reader = pair.master.try_clone_reader()?;

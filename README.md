@@ -30,12 +30,40 @@ cargo test
 Not implemented yet: SGR colours and attributes, wide (CJK) double-width cells,
 scrollback, the alternate screen, mouse reporting, and text selection.
 
+## Configuration
+
+On first run the app writes a `config.py` into the config directory —
+`$XDG_CONFIG_HOME/hex-te/config.py`, or `~/.config/hex-te/config.py` when
+`XDG_CONFIG_HOME` is unset — and reads it back with an embedded Python
+interpreter (`pyo3`). Nothing in it is required: a name that is missing or of the
+wrong type keeps the default the file documents, and a file that cannot be
+evaluated is reported while the defaults are used, so a broken config cannot stop
+the terminal starting.
+
+| Setting | Meaning |
+| --- | --- |
+| `font_size` | Size glyphs are rasterized at, in logical pixels |
+| `window_width`, `window_height` | Size of a new window, in logical pixels |
+| `shell` | Program to run inside the pty; `None` means `$SHELL` |
+| `background`, `cursor_color` | Colours, as `(r, g, b)` floats in `0.0..=1.0` |
+
+Because the file is Python, a setting can be computed rather than written out:
+
+```python
+import math
+
+font_size = math.floor(15.7)
+```
+
+Note that a window manager is free to override the requested window size.
+
 ## Structure
 
 | File | Responsibility |
 | --- | --- |
 | `src/main.rs` | Creates the event loop, its user-event channel, and the application |
 | `src/app.rs` | The winit glue: turns events into `Control` values and runs them through the systems |
+| `src/config.rs` | Writes and evaluates the Python `config.py` through `pyo3` |
 | `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
 | `src/terminal.rs` | The VT parser and character grid, key encoding, and glyph rasterization |
 | `src/font.rs` | Loads the system monospace face and answers rasterization requests |

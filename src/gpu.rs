@@ -7,10 +7,8 @@ use crate::{WINDOW_TITLE, terminal::Terminal};
 
 const SCREEN_SHADER: &str = include_str!("shaders/screen.wgsl");
 
+// The cursor is drawn as a filled block rather than a bar or an underline.
 const CURSOR_BLOCK: u32 = 0;
-
-const BACKGROUND: [f32; 4] = [0.05, 0.06, 0.08, 1.0];
-const CURSOR_COLOR: [f32; 4] = [0.16, 0.72, 0.72, 1.0];
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -68,7 +66,14 @@ fn create_screen_bind_group(
 }
 
 impl Gpu {
-    pub(crate) async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+    /// Opens the surface on `window` and builds the screen pipeline.
+    ///
+    /// `background` and `cursor_color` come from the config file, as `r, g, b, a`.
+    pub(crate) async fn new(
+        window: Arc<Window>,
+        background: [f32; 4],
+        cursor_color: [f32; 4],
+    ) -> anyhow::Result<Self> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
 
@@ -187,8 +192,8 @@ impl Gpu {
         });
 
         let screen = ScreenUniforms {
-            background: BACKGROUND,
-            cursor_color: CURSOR_COLOR,
+            background,
+            cursor_color,
             resolution: [config.width as f32, config.height as f32],
             grid: [1, 1],
             cursor: [0, 0],

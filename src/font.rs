@@ -3,9 +3,6 @@
 
 use fontdue::{Font as Face, FontSettings, LineMetrics, Metrics};
 
-/// The size glyphs are rasterized at.
-const FONT_SIZE: f32 = 16.0;
-
 /// A monospaced face plus the cell metrics derived from it.
 ///
 /// [`Terminal`](crate::terminal::Terminal) holds a handle to this rather than a
@@ -17,8 +14,9 @@ pub(crate) struct Font {
 }
 
 impl Font {
-    /// Picks the first usable monospaced face out of the system font database.
-    pub fn load() -> anyhow::Result<Self> {
+    /// Picks the first usable monospaced face out of the system font database
+    /// and measures it at `size` logical pixels.
+    pub fn load(size: f32) -> anyhow::Result<Self> {
         let mut database = fontdb::Database::new();
         database.load_system_fonts();
 
@@ -41,11 +39,10 @@ impl Font {
             })
             .ok_or_else(|| anyhow::anyhow!("no usable monospace font found"))?;
 
-        Ok(Self::with_face(face))
+        Ok(Self::with_face(face, size))
     }
 
-    fn with_face(face: Face) -> Self {
-        let size = FONT_SIZE;
+    fn with_face(face: Face, size: f32) -> Self {
         let cell = (
             face.metrics('a', size).advance_width.max(1.0),
             face.horizontal_line_metrics(size)
@@ -77,7 +74,7 @@ mod tests {
 
     #[test]
     fn loading_a_system_font_gives_a_usable_cell() {
-        let font = Font::load().expect("a system monospace font");
+        let font = Font::load(16.0).expect("a system monospace font");
         let (width, height) = font.cell();
 
         assert!(width > 0.0 && height > 0.0);

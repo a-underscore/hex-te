@@ -14,6 +14,7 @@ mod app;
 // no caller yet. These allow-lists go away as that lands.
 #[allow(dead_code)]
 mod components;
+mod config;
 mod control;
 mod font;
 mod gpu;

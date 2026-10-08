@@ -15,13 +15,11 @@ use winit::{
 };
 
 use crate::WINDOW_TITLE;
+use crate::config::Config;
 use crate::font::Font;
 use crate::gpu::Gpu;
 use crate::pty::Pty;
 use crate::terminal::{Terminal, encode_key};
-
-const INITIAL_WIDTH: u32 = 1024;
-const INITIAL_HEIGHT: u32 = 640;
 
 /// Wakes the event loop back up when the shell has something to say.
 #[derive(Debug)]
@@ -57,11 +55,16 @@ impl App {
 
             // Register the managers up front so the world knows about the app's
             // component types before the first `attach`.
+            em.register::<Config>();
             em.register::<Gpu>();
             em.register::<Font>();
             em.register::<Terminal>();
             em.register::<Pty>();
         }
+
+        // Read before the window exists, because the config sizes it; this is
+        // also what writes the documented default file on first run.
+        world.read().unwrap().attach_value(entity, Config::load());
 
         let mut systems = SystemManager::new();
         systems.add(0, TerminalSystem::new(entity, proxy));
@@ -93,6 +96,13 @@ impl App {
     /// The component of type `C` attached to the app's entity.
     fn component<C: Send + Sync + 'static>(&self) -> Option<Arc<RwLock<C>>> {
         self.world.read().unwrap().component::<C>(self.entity)
+    }
+
+    /// The config, or the built-in defaults if it is somehow missing.
+    fn config(&self) -> Config {
+        self.component::<Config>()
+            .map(|config| config.read().unwrap().clone())
+            .unwrap_or_default()
     }
 }
 
@@ -205,14 +215,19 @@ impl System<UserEvent> for TerminalSystem {
     fn init(&mut self, world: Arc<RwLock<World>>) -> anyhow::Result<()> {
         let world = world.read().unwrap();
 
-        let font = world.attach_value(self.entity, Font::load()?);
+        let config = world
+            .component::<Config>(self.entity)
+            .map(|config| config.read().unwrap().clone())
+            .unwrap_or_default();
+
+        let font = world.attach_value(self.entity, Font::load(config.font_size)?);
         world.attach_value(self.entity, Terminal::new(font));
 
         // Reads from the pty block, so they happen on the reader thread and the
         // result is handed to the event loop as a user event.
         let sink = Arc::clone(&self.pending);
         let proxy = self.proxy.clone();
-        let pty = Pty::new(move |chunk| match chunk {
+        let pty = Pty::new(config.shell.as_deref(), move |chunk| match chunk {
             Some(bytes) => {
                 if let Ok(mut collected) = sink.lock() {
                     collected.extend_from_slice(bytes);
@@ -265,9 +280,11 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        let config = self.config();
+
         let attributes = Window::default_attributes()
             .with_title(WINDOW_TITLE)
-            .with_inner_size(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT));
+            .with_inner_size(LogicalSize::new(config.window_size.0, config.window_size.1));
 
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -278,7 +295,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
 
-        let gpu = match pollster::block_on(Gpu::new(window)) {
+        let gpu = match pollster::block_on(Gpu::new(window, config.background, config.cursor_color))
+        {
             Ok(gpu) => gpu,
             Err(error) => {
                 eprintln!("{WINDOW_TITLE}: {error:#}");
