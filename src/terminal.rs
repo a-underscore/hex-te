@@ -2,12 +2,22 @@ use crate::font::Font;
 use crate::pty::{INITIAL_COLS, INITIAL_ROWS};
 use crate::{WINDOW_TITLE, gpu::Gpu};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use vte::{Params, Perform};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+/// How long each half of a blink lasts: the cursor and a cell that asked for
+/// `SGR 5` are shown for one half-cycle and hidden for the next.
+const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) struct Terminal {
     pub cursor_position: (usize, usize),
     pub cursor_size: (f32, f32),
+    /// Whether the cursor is painted this frame: the shell can hide it with
+    /// `DECTCEM`, and a blinking cursor is hidden on alternate half-cycles.
+    pub cursor_visible: bool,
+    /// The cursor's shape, in the shader's `cursor_style` constants.
+    pub cursor_style: u32,
     pub size: (usize, usize),
     pub last_texture_size: wgpu::Extent3d,
     pub texture: Option<wgpu::Texture>,
@@ -17,6 +27,8 @@ pub(crate) struct Terminal {
     /// The colours the grid is painted with.
     palette: Palette,
     screen: Screen,
+    /// The clock the cursor and every `SGR 5` cell share.
+    blink: Blink,
     parser: vte::Parser,
 }
 
@@ -33,6 +45,8 @@ impl Terminal {
         let mut terminal = Self {
             cursor_position: (0, 0),
             cursor_size,
+            cursor_visible: true,
+            cursor_style: CursorStyle::default().shape(),
             size: (0, 0),
             last_texture_size: wgpu::Extent3d {
                 width: 0,
@@ -43,6 +57,7 @@ impl Terminal {
             font,
             palette: Palette::new(background),
             screen: Screen::default(),
+            blink: Blink::new(),
             parser: vte::Parser::new(),
         };
 
@@ -115,11 +130,54 @@ impl Terminal {
     /// chunk size they happen to have.
     pub(crate) fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.screen, bytes);
-        self.update_cursor_position();
+        self.update_cursor_state();
     }
 
-    fn update_cursor_position(&mut self) {
+    /// Refreshes everything the renderer reads about the cursor: where it is,
+    /// what it looks like, and whether the blink clock has anything to animate.
+    fn update_cursor_state(&mut self) {
+        let style = self.screen.cursor_style;
+
+        // The clock only runs while something changes between its two halves: a
+        // cursor that is drawn and blinks, or a cell that asked for `SGR 5`.
+        self.blink.active =
+            (!self.screen.cursor_hidden && style.blinking()) || self.screen.blinks();
+
         self.cursor_position = self.screen.cursor();
+        self.cursor_style = style.shape();
+        self.cursor_visible = cursor_drawn(&self.blink, &self.screen);
+
+        // The next frame paints this phase; the clock only asks for a redraw
+        // when it has moved on since the last one.
+        self.blink.sync();
+    }
+
+    /// Advances the blink clock, reporting whether the phase on screen changed —
+    /// the one thing that needs a redraw.
+    pub(crate) fn tick_blink(&mut self) -> bool {
+        self.blink.tick()
+    }
+
+    /// When the blink next flips, so the event loop can sleep until then.
+    /// `None` while nothing on screen blinks.
+    pub(crate) fn next_blink(&self) -> Option<Instant> {
+        self.blink.deadline()
+    }
+
+    /// Restarts the blink on its visible half — what typing does, so the cursor
+    /// does not vanish from under the keystroke.
+    pub(crate) fn wake_blink(&mut self) {
+        self.blink.wake();
+    }
+
+    /// A window without focus does not blink: the cursor is left solid and a
+    /// cell that asked for `SGR 5` is drawn steadily.
+    pub(crate) fn set_focused(&mut self, focused: bool) {
+        self.blink.focused = focused;
+
+        if focused {
+            self.blink.wake();
+        }
     }
 
     fn update_grid_size(&mut self, width: usize, height: usize) {
@@ -134,7 +192,7 @@ impl Terminal {
             (height as f32 / cell_height).floor().max(1.0) as usize,
         );
         self.screen.resize(self.size.0, self.size.1);
-        self.update_cursor_position();
+        self.update_cursor_state();
     }
 
     /// Paints the whole grid into an RGBA buffer, in the sRGB bytes the screen
@@ -164,6 +222,10 @@ impl Terminal {
         };
 
         let rule = ((cell_height / 12.0).round() as i32).max(1);
+
+        // The half of the blink being painted: a `SGR 5` cell is blank on the
+        // other one.
+        let blink = self.blink.visible();
 
         // A cell's edges are rounded once and shared with its neighbour, so the
         // cells tile the texture exactly. Rounding each cell's own origin *and*
@@ -196,9 +258,13 @@ impl Terminal {
 
                 fill_rect(&mut buffer, w, h, rect, paint.bg);
 
+                // A cell that asked for `SGR 5` keeps its background but loses
+                // everything drawn over it on the invisible half of the blink.
+                let hidden = !blink && cell.attrs.contains(Attrs::BLINK);
+
                 // Blank cells are the common case and have nothing on top of
                 // their background.
-                if cell.ch != ' ' {
+                if cell.ch != ' ' && !hidden {
                     let (metrics, bitmap) = font.rasterize(cell.ch);
 
                     if metrics.width > 0 && metrics.height > 0 {
@@ -237,7 +303,7 @@ impl Terminal {
                 }
 
                 // Underline and strikethrough are rules, not glyphs.
-                if cell.attrs.contains(Attrs::UNDERLINE) {
+                if cell.attrs.contains(Attrs::UNDERLINE) && !hidden {
                     let y = rect.y + rect.height - rule;
 
                     fill_rect(
@@ -253,7 +319,7 @@ impl Terminal {
                     );
                 }
 
-                if cell.attrs.contains(Attrs::STRIKE) {
+                if cell.attrs.contains(Attrs::STRIKE) && !hidden {
                     let y = rect.y + (rect.height - rule) / 2;
 
                     fill_rect(
@@ -272,6 +338,94 @@ impl Terminal {
         }
 
         buffer
+    }
+}
+
+/// Whether the cursor is painted: it has to be shown at all, and on the visible
+/// half of the blink when its style is one that blinks.
+fn cursor_drawn(blink: &Blink, screen: &Screen) -> bool {
+    !screen.cursor_hidden && (!screen.cursor_style.blinking() || blink.visible())
+}
+
+/// The clock the cursor and every `SGR 5` cell share.
+///
+/// The phase is worked out from when the clock last started rather than flipped
+/// by a frame, so a redraw in the middle of a half-cycle paints the same phase
+/// again and the blink keeps its rate whatever the frame rate is.
+#[derive(Debug)]
+struct Blink {
+    /// When the current half-cycle began. Restarted when the user types, so the
+    /// cursor stays visible while keys are arriving.
+    started: Instant,
+    /// A window without focus does not blink.
+    focused: bool,
+    /// Whether anything changes between the two halves — a cursor that is drawn
+    /// and blinks, or a cell that asked for `SGR 5`. Nothing to animate means
+    /// no wake-ups at all.
+    active: bool,
+    /// The phase as it was last painted, so a wake-up only redraws when the
+    /// screen would really change.
+    shown: bool,
+}
+
+impl Blink {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            focused: true,
+            active: false,
+            shown: true,
+        }
+    }
+
+    /// Whether the clock is running: there is focus, and something to animate.
+    fn running(&self) -> bool {
+        self.focused && self.active
+    }
+
+    /// Whether the visible half is showing. A stopped clock keeps it showing.
+    fn visible(&self) -> bool {
+        !self.running() || self.on()
+    }
+
+    /// The phase of the clock itself: on for the even half-cycles.
+    fn on(&self) -> bool {
+        let half_cycle = self.started.elapsed().as_nanos() / BLINK_INTERVAL.as_nanos();
+
+        half_cycle.is_multiple_of(2)
+    }
+
+    /// When the phase next flips, or `None` while the clock is stopped.
+    fn deadline(&self) -> Option<Instant> {
+        if !self.running() {
+            return None;
+        }
+
+        let half = BLINK_INTERVAL.as_nanos();
+        let remaining = half - self.started.elapsed().as_nanos() % half;
+
+        Some(Instant::now() + Duration::from_nanos(remaining as u64))
+    }
+
+    /// Starts a fresh visible half.
+    fn wake(&mut self) {
+        self.started = Instant::now();
+        self.shown = true;
+    }
+
+    /// Advances to this instant, reporting whether the phase on screen changed.
+    fn tick(&mut self) -> bool {
+        let visible = self.visible();
+        let changed = visible != self.shown;
+
+        self.shown = visible;
+
+        changed
+    }
+
+    /// Remembers the phase the frame about to be painted will show.
+    fn sync(&mut self) {
+        self.shown = self.visible();
     }
 }
 
@@ -533,6 +687,52 @@ fn blend(bg: [u8; 3], fg: [u8; 3], coverage: u8) -> [u8; 3] {
     [mix(bg[0], fg[0]), mix(bg[1], fg[1]), mix(bg[2], fg[2])]
 }
 
+/// The cursor a shell asked for with `DECSCUSR` (`CSI Ps SP q`). The default is
+/// the blinking block the terminal starts with; the variants match the
+/// sequence's parameters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CursorStyle {
+    #[default]
+    BlinkingBlock,
+    SteadyBlock,
+    BlinkingUnderline,
+    SteadyUnderline,
+    BlinkingBar,
+    SteadyBar,
+}
+
+impl CursorStyle {
+    /// `DECSCUSR`'s parameter: `0` and `1` are the blinking block, and a value
+    /// the terminal does not know keeps that default.
+    fn from_param(param: u16) -> Self {
+        match param {
+            2 => Self::SteadyBlock,
+            3 => Self::BlinkingUnderline,
+            4 => Self::SteadyUnderline,
+            5 => Self::BlinkingBar,
+            6 => Self::SteadyBar,
+            _ => Self::BlinkingBlock,
+        }
+    }
+
+    fn blinking(self) -> bool {
+        matches!(
+            self,
+            Self::BlinkingBlock | Self::BlinkingUnderline | Self::BlinkingBar
+        )
+    }
+
+    /// The shape as the shader's `cursor_style` constant: block, bar, then
+    /// underline.
+    fn shape(self) -> u32 {
+        match self {
+            Self::BlinkingBlock | Self::SteadyBlock => 0,
+            Self::BlinkingBar | Self::SteadyBar => 1,
+            Self::BlinkingUnderline | Self::SteadyUnderline => 2,
+        }
+    }
+}
+
 /// The character grid the VT parser draws into, plus the little state it needs
 /// (the pen, the cursor and a pending wrap).
 ///
@@ -550,6 +750,12 @@ struct Screen {
     /// *next* character arrives, which is what real terminals do and what keeps
     /// a full line from scrolling a row too early.
     wrap_pending: bool,
+    /// Set by `DECTCEM` (`CSI ? 25 l`): a hidden cursor is never drawn, blinking
+    /// or not.
+    cursor_hidden: bool,
+    /// The shape the cursor is drawn with, and whether it blinks: what
+    /// `DECSCUSR` (`CSI Ps SP q`) asked for.
+    cursor_style: CursorStyle,
 }
 
 impl Screen {
@@ -562,6 +768,14 @@ impl Screen {
 
     fn cursor(&self) -> (usize, usize) {
         self.cursor
+    }
+
+    /// Whether any cell asked for `SGR 5`, so the blink clock has something to
+    /// animate even when the cursor itself does not blink.
+    fn blinks(&self) -> bool {
+        self.cells
+            .iter()
+            .any(|cell| cell.attrs.contains(Attrs::BLINK))
     }
 
     fn cell(&self, row: usize, col: usize) -> Cell {
@@ -854,6 +1068,22 @@ impl Screen {
         }
     }
 
+    /// `CSI ? Pm h` / `CSI ? Pm l`: the private modes the grid understands.
+    /// Only `DECTCEM` (25, the cursor's visibility) is honoured; the rest are
+    /// consumed here so they never reach the grid as text.
+    fn set_mode(&mut self, params: &Params, enabled: bool) {
+        for group in params.iter() {
+            if group.first() == Some(&25) {
+                self.cursor_hidden = !enabled;
+            }
+        }
+    }
+
+    /// `DECSCUSR` (`CSI Ps SP q`): the cursor's shape, and whether it blinks.
+    fn set_cursor_style(&mut self, param: u16) {
+        self.cursor_style = CursorStyle::from_param(param);
+    }
+
     #[cfg(test)]
     fn line(&self, row: usize) -> String {
         (0..self.cols).map(|col| self.cell(row, col).ch).collect()
@@ -876,13 +1106,7 @@ impl Perform for Screen {
         }
     }
 
-    fn csi_dispatch(
-        &mut self,
-        params: &Params,
-        _intermediates: &[u8],
-        _ignore: bool,
-        action: char,
-    ) {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let count = param(params, 0, 1) as isize;
 
         match action {
@@ -909,8 +1133,13 @@ impl Perform for Screen {
             'J' => self.erase_display(param(params, 0, 0)),
             'K' => self.erase_line(param(params, 0, 0)),
             'm' => self.sgr(params),
-            // Mode set/reset and device status are ignored for now; they are
-            // consumed here so they never reach the grid as text.
+            // `DECTCEM`: `CSI ? 25 h` shows the cursor and `CSI ? 25 l` hides it.
+            'h' | 'l' if intermediates == b"?".as_slice() => self.set_mode(params, action == 'h'),
+            // `DECSCUSR`: `CSI Ps SP q` picks the shape and whether it blinks.
+            'q' if intermediates == b" ".as_slice() => self.set_cursor_style(param(params, 0, 1)),
+            // Everything else — the alternate screen, device status and the rest
+            // of the modes — is consumed here so it never reaches the grid as
+            // text.
             _ => {}
         }
     }
@@ -1022,8 +1251,12 @@ fn with_alt(mut bytes: Vec<u8>, modifiers: ModifiersState) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ANSI, Attrs, Color, Font, Screen, Terminal, encode_key};
+    use super::{
+        ANSI, Attrs, BLINK_INTERVAL, Blink, Color, CursorStyle, Font, Screen, Terminal,
+        cursor_drawn, encode_key,
+    };
     use std::sync::{Arc, RwLock};
+    use std::time::Instant;
     use vte::Parser;
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
@@ -1250,5 +1483,134 @@ mod tests {
         assert!(terminal.size.1 < large_grid.1);
         assert_eq!(terminal.screen.line(0).trim_end(), "ab      c");
         assert_eq!(terminal.screen.line(1).trim_end(), "X");
+    }
+
+    #[test]
+    fn the_blink_attribute_is_set_and_cleared_by_sgr() {
+        let screen = screen(2, 1, b"\x1b[5mX\x1b[25mY");
+
+        assert!(screen.cell(0, 0).attrs.contains(Attrs::BLINK));
+        assert!(!screen.cell(0, 1).attrs.contains(Attrs::BLINK));
+    }
+
+    #[test]
+    fn decscusr_picks_the_cursor_shape_and_whether_it_blinks() {
+        assert_eq!(
+            screen(1, 1, b"\x1b[5 q").cursor_style,
+            CursorStyle::BlinkingBar
+        );
+        assert_eq!(
+            screen(1, 1, b"\x1b[2 q").cursor_style,
+            CursorStyle::SteadyBlock
+        );
+        // No parameter is the blinking block the terminal starts with.
+        assert_eq!(
+            screen(1, 1, b"\x1b[ q").cursor_style,
+            CursorStyle::default()
+        );
+    }
+
+    #[test]
+    fn dectcem_hides_the_cursor_until_it_is_shown_again() {
+        assert!(screen(1, 1, b"\x1b[?25l").cursor_hidden);
+        assert!(!screen(1, 1, b"\x1b[?25l\x1b[?25h").cursor_hidden);
+        assert!(!screen(1, 1, b"\x1b[?25h").cursor_hidden);
+    }
+
+    #[test]
+    fn vims_modes_get_the_cursor_shape_they_ask_for() {
+        // What Vim and Neovim send for `guicursor`'s defaults
+        // (`n-v-c-sm:block,i-ci-ve:ver25,r-cr-o:hor20`): a block in normal mode,
+        // the thin bar that `ver25` stands for in insert mode, and an underline
+        // for replace mode's `hor20`.
+        let shape = |bytes: &[u8]| screen(1, 1, bytes).cursor_style;
+
+        assert_eq!(shape(b"\x1b[2 q").shape(), 0); // block
+        assert_eq!(shape(b"\x1b[6 q").shape(), 1); // bar, thinner than the block
+        assert_eq!(shape(b"\x1b[4 q").shape(), 2); // underline
+
+        // Every mode is steady: the cursor must not blink out while one lasts.
+        for bytes in [b"\x1b[2 q", b"\x1b[6 q", b"\x1b[4 q"] {
+            assert!(!shape(bytes).blinking());
+        }
+    }
+
+    #[test]
+    fn the_blink_clock_alternates_on_its_interval() {
+        let mut blink = Blink::new();
+
+        // Nothing to animate: it shows, and it never has to wake the loop.
+        assert!(blink.visible());
+        assert_eq!(blink.deadline(), None);
+
+        blink.active = true;
+        assert!(blink.visible()); // a fresh clock starts on the visible half
+        assert!(blink.deadline().is_some());
+
+        blink.started = Instant::now() - BLINK_INTERVAL;
+        assert!(!blink.visible());
+
+        blink.started = Instant::now() - BLINK_INTERVAL * 2;
+        assert!(blink.visible());
+    }
+
+    #[test]
+    fn a_window_without_focus_does_not_blink() {
+        let mut blink = Blink::new();
+        blink.active = true;
+        blink.focused = false;
+        blink.started = Instant::now() - BLINK_INTERVAL;
+
+        assert!(blink.visible());
+        assert_eq!(blink.deadline(), None);
+    }
+
+    #[test]
+    fn typing_starts_a_fresh_visible_half() {
+        let mut blink = Blink::new();
+        blink.active = true;
+        blink.started = Instant::now() - BLINK_INTERVAL;
+        assert!(!blink.visible());
+
+        blink.wake();
+
+        assert!(blink.visible());
+    }
+
+    #[test]
+    fn the_cursor_is_drawn_only_when_it_is_shown_and_on_the_visible_half() {
+        let mut blink = Blink::new();
+        let mut screen = Screen::default();
+
+        assert!(cursor_drawn(&blink, &screen));
+
+        // A steady style keeps the cursor drawn even on the clock's off half.
+        screen.cursor_style = CursorStyle::SteadyBlock;
+        blink.active = true;
+        blink.started = Instant::now() - BLINK_INTERVAL;
+        assert!(!blink.visible());
+        assert!(cursor_drawn(&blink, &screen));
+
+        // A cursor the shell hid is not drawn at all.
+        screen.cursor_hidden = true;
+        assert!(!cursor_drawn(&blink, &screen));
+    }
+
+    #[test]
+    fn a_blinking_cell_is_blank_on_the_off_half() {
+        let mut terminal = terminal();
+        terminal.update_grid_size(256, 64);
+        terminal.feed(b"\x1b[5mX");
+
+        // Anything that is not the default background is a painted pixel.
+        let painted = |pixels: &[u8]| pixels.chunks_exact(4).filter(|p| p[0] != 63).count();
+
+        let on = painted(&terminal.rasterize(256, 64));
+
+        terminal.blink.started = Instant::now() - BLINK_INTERVAL;
+        let off = painted(&terminal.rasterize(256, 64));
+
+        assert!(on > 0);
+        assert_eq!(off, 0);
     }
 }

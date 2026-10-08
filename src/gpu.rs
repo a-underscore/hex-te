@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -7,7 +9,31 @@ use crate::{WINDOW_TITLE, terminal::Terminal};
 
 const SCREEN_SHADER: &str = include_str!("shaders/screen.wgsl");
 
-// The cursor is drawn as a filled block rather than a bar or an underline.
+/// The WGSL the screen pipeline is built from.
+///
+/// A config that names a file is read here, at startup, which makes editing the
+/// shader a restart instead of a rebuild. Anything wrong with the name — a file
+/// that is missing or cannot be read — is reported and the shader compiled into
+/// the binary is used instead, so a bad path never leaves the terminal without a
+/// pipeline at all.
+fn screen_shader(path: Option<&Path>) -> Cow<'static, str> {
+    let Some(path) = path else {
+        return Cow::Borrowed(SCREEN_SHADER);
+    };
+
+    match std::fs::read_to_string(path) {
+        Ok(source) => Cow::Owned(source),
+        Err(error) => {
+            eprintln!("{WINDOW_TITLE}: reading {}: {error}", path.display());
+
+            Cow::Borrowed(SCREEN_SHADER)
+        }
+    }
+}
+
+// The shaped cursor the pipeline starts with, before a shell asks for another
+// one with `DECSCUSR`. The numbers are the ones `src/shaders/screen.wgsl`
+// matches on, and `terminal::CursorStyle::shape` produces.
 const CURSOR_BLOCK: u32 = 0;
 
 #[repr(C)]
@@ -68,11 +94,13 @@ fn create_screen_bind_group(
 impl Gpu {
     /// Opens the surface on `window` and builds the screen pipeline.
     ///
-    /// `background` and `cursor_color` come from the config file, as `r, g, b, a`.
+    /// `background` and `cursor_color` come from the config file, as `r, g, b, a`,
+    /// and `shader` is the WGSL file the config named, when it named one.
     pub(crate) async fn new(
         window: Arc<Window>,
         background: [f32; 4],
         cursor_color: [f32; 4],
+        shader: Option<&Path>,
     ) -> anyhow::Result<Self> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -101,9 +129,9 @@ impl Gpu {
             .ok_or_else(|| anyhow!("the adapter cannot drive this surface"))?;
         surface.configure(&device, &config);
 
-        let screen_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let screen_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(WINDOW_TITLE),
-            source: wgpu::ShaderSource::Wgsl(SCREEN_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(screen_shader(shader)),
         });
 
         let screen_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -148,7 +176,7 @@ impl Gpu {
             label: Some(WINDOW_TITLE),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &screen_shader,
+                module: &screen_module,
                 entry_point: Some("vs_screen"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[],
@@ -157,7 +185,7 @@ impl Gpu {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
-                module: &screen_shader,
+                module: &screen_module,
                 entry_point: Some("fs_screen"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(config.format.into())],
@@ -310,6 +338,8 @@ impl Gpu {
         ];
         self.screen.grid = [terminal.size.0 as u32, terminal.size.1 as u32];
         self.screen.cursor_size = [terminal.cursor_size.0, terminal.cursor_size.1];
+        self.screen.cursor_visible = u32::from(terminal.cursor_visible);
+        self.screen.cursor_style = terminal.cursor_style;
         self.queue
             .write_buffer(&self.screen_buffer, 0, bytemuck::bytes_of(&self.screen));
 
@@ -345,5 +375,41 @@ impl Gpu {
         self.queue.present(frame);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SCREEN_SHADER, screen_shader};
+    use std::path::{Path, PathBuf};
+
+    /// A path under the temp dir that this test owns.
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("hext-shader-{}-{name}.wgsl", std::process::id()))
+    }
+
+    #[test]
+    fn the_compiled_shader_is_what_no_setting_gets() {
+        assert_eq!(&*screen_shader(None), SCREEN_SHADER);
+    }
+
+    #[test]
+    fn a_named_shader_file_is_loaded_instead() {
+        let path = scratch("named");
+        std::fs::write(&path, "// the file the config named\n").unwrap();
+
+        assert_eq!(
+            &*screen_shader(Some(&path)),
+            "// the file the config named\n"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_shader_file_that_cannot_be_read_falls_back() {
+        let missing = Path::new("/nonexistent/hext/screen.wgsl");
+
+        assert_eq!(&*screen_shader(Some(missing)), SCREEN_SHADER);
     }
 }

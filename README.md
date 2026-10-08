@@ -18,6 +18,13 @@ cargo test  # unit and shader tests
   256-colour cube and its greys, and 24-bit truecolour, for foreground and
   background, with bold, dim, hidden, inverse, underline and strikethrough
   resolved as each cell is drawn.
+- Blinks the cursor and any cell the shell marked with `SGR 5`, on a 500 ms
+  clock that stops while the window is not focused and restarts on a keystroke,
+  so the cursor never vanishes from under the typing.
+- Honours the cursor requests a program makes: `DECTCEM` (`CSI ? 25 h`/`l`) hides
+  and shows it, and `DECSCUSR` (`CSI Ps SP q`) picks the block, bar or underline
+  shape and whether it blinks — so Vim and Neovim get a block in normal mode, a
+  thin bar in insert mode and an underline in replace mode.
 - Forwards keystrokes to the shell: arrows, Home/End, Insert/Delete, PageUp/Down,
   `Ctrl`+letter as control codes, and `Alt`+key as an `ESC` prefix.
 - The shell's own echo is the only thing drawn, so there is no double echo and
@@ -33,7 +40,7 @@ cargo test  # unit and shader tests
 - Lets the config file add systems of its own, so Python can shape the running
   app rather than only fill in settings.
 
-Not implemented yet: italic, blink and a distinct bold face (those attributes
+Not implemented yet: italic and a distinct bold face (those attributes
 are parsed, but the loaded font has a single face), styled or coloured
 underlines, wide (CJK) double-width cells, scrollback, the alternate screen,
 mouse reporting, and text selection.
@@ -55,11 +62,44 @@ These are the names the file documents:
 | `window_width`, `window_height` | Size of a new window, in logical pixels |
 | `shell` | Program to run inside the pty; `None` means `$SHELL` |
 | `background`, `cursor_color` | Colours, as `(r, g, b)` floats in `0.0..=1.0` |
+| `shader` | A WGSL file to draw the screen with; `None` keeps the built-in one |
 
-Reading those settings back is not wired up right now: the loader evaluates the
-file for its effect on `world` (below), so the names above are documented but not
-yet applied. The file is read once, when the app starts, so restart it to pick up
-an edit; a window manager is free to override the requested window size.
+`shader` is the one setting that is applied today: the app reads that file at
+startup and builds the screen pipeline from it, so a shader can be edited without
+rebuilding — the rest of the names above are documented but not read back yet. A
+file that cannot be read is reported and the shader compiled into the binary is
+used instead. The file is read once, when the app starts, so restart it to pick
+up an edit; a window manager is free to override the requested window size.
+
+### Custom shaders
+
+Naming a `shader` swaps the look of the whole terminal without touching Rust — a
+vignette, a scanline overlay, a colour grade, whatever the fragment shader makes
+of the sampled texture:
+
+```python
+shader = "/home/you/.config/hext/crt.wgsl"
+```
+
+The file has to provide what the app binds, because the app does not know which
+entry points it will find:
+
+| Binding | What it is |
+| --- | --- |
+| `@group(0) @binding(0)` | A `Screen` uniform: `background`, `cursor_color`, `resolution`, `grid`, `cursor`, `cursor_visible`, `cursor_style`, `cursor_size` |
+| `@group(0) @binding(1)` | The screen texture: the finished grid, in the sRGB bytes |
+| `@group(0) @binding(2)` | A sampler for that texture |
+
+`vs_screen` draws one fullscreen triangle from `@builtin(vertex_index)` and
+`fs_screen` returns a colour for `@builtin(position)`. `src/shaders/screen.wgsl`
+is the reference: it maps the pixel position onto the texture and mixes
+`cursor_color` over the cursor's cell, using `cursor_style` to choose the block,
+bar or underline mask.
+
+A file that cannot be read falls back to the built-in shader with a message on
+stderr. A file that is present but not valid WGSL is a wgpu error instead, so
+check the shader you are editing with `cargo test` (the built-in one is parsed and
+validated there).
 
 ### The world
 
@@ -100,11 +140,11 @@ system added while they run joins the next event, not the one in progress.
 | `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
 | `src/terminal.rs` | The VT parser and character grid, key encoding, and the rasterizer that paints cells and glyphs into the screen texture |
 | `src/font.rs` | Loads the system monospace face and answers rasterization requests |
-| `src/gpu.rs` | Configures the surface and renders the texture and cursor |
+| `src/gpu.rs` | Configures the surface, builds the screen pipeline from the configured shader, and renders the texture and cursor |
 | `src/world/` | The entity-component world: the entity store, the system manager, and the ambient values |
 | `src/control.rs` | The event value a system is handed each turn, plus its `exit` flag |
 | `src/id.rs` | The `Id` entity handle |
-| `src/shaders/screen.wgsl` | Draws the screen texture and cursor overlay |
+| `src/shaders/screen.wgsl` | The built-in screen shader: draws the screen texture and the cursor overlay |
 
 Data flows one way around the loop: keystrokes are encoded and written to the PTY,
 the shell echoes and prints, the reader thread collects the bytes and wakes the

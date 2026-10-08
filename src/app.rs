@@ -9,7 +9,7 @@ use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
     event::{ElementState, Event, WindowEvent},
-    event_loop::{ActiveEventLoop, EventLoopProxy},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy},
     keyboard::ModifiersState,
     window::{Window, WindowId},
 };
@@ -26,6 +26,8 @@ use crate::terminal::{Terminal, encode_key};
 pub(crate) enum UserEvent {
     /// The shell wrote output that still has to be parsed and drawn.
     Output,
+    /// The blink clock reached its next deadline; the phase may have flipped.
+    Blink,
     /// The shell exited, so there is nothing left to show.
     Closed,
 }
@@ -190,6 +192,15 @@ impl TerminalSystem {
         match event {
             WindowEvent::CloseRequested => return true,
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            // Blinking stops while the window is in the background, so the
+            // cursor is left solid and stays where it was left.
+            WindowEvent::Focused(focused) => {
+                if let Some(terminal) = self.terminal(world) {
+                    terminal.write().unwrap().set_focused(*focused);
+                }
+
+                self.request_redraw(world);
+            }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = self.gpu(world) {
                     gpu.write().unwrap().resize(size.width, size.height);
@@ -199,6 +210,12 @@ impl TerminalSystem {
             }
             WindowEvent::RedrawRequested => self.redraw(world),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // The cursor shows again while keys are arriving, the way a
+                // terminal stops blinking when it is typed into.
+                if let Some(terminal) = self.terminal(world) {
+                    terminal.write().unwrap().wake_blink();
+                }
+
                 if let Some(bytes) = encode_key(&event.logical_key, self.modifiers)
                     && let Some(pty) = self.pty(world)
                     && let Err(error) = pty.read().unwrap().write(&bytes)
@@ -267,6 +284,15 @@ impl System<UserEvent> for TerminalSystem {
                     self.pump(&world);
                     self.request_redraw(&world);
                 }
+                Event::UserEvent(UserEvent::Blink) => {
+                    // Only redraw when the phase really moved: this event is
+                    // dispatched on every wake-up, deadlines included.
+                    if let Some(terminal) = self.terminal(&world)
+                        && terminal.write().unwrap().tick_blink()
+                    {
+                        self.request_redraw(&world);
+                    }
+                }
                 Event::UserEvent(UserEvent::Closed) => exit = true,
                 _ => {}
             }
@@ -301,8 +327,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
 
-        let gpu = match pollster::block_on(Gpu::new(window, config.background, config.cursor_color))
-        {
+        let gpu = match pollster::block_on(Gpu::new(
+            window,
+            config.background,
+            config.cursor_color,
+            config.shader.as_deref(),
+        )) {
             Ok(gpu) => gpu,
             Err(error) => {
                 eprintln!("{WINDOW_TITLE}: {error:#}");
@@ -326,6 +356,23 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         self.dispatch(event_loop, Event::UserEvent(event));
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // The blink clock is driven through the systems like every other event;
+        // this is the one event the app makes up itself.
+        self.dispatch(event_loop, Event::UserEvent(UserEvent::Blink));
+
+        // Then sleep until the clock's next flip, so a quiet shell costs
+        // nothing at all. `Wait` is enough once nothing on screen blinks.
+        let deadline = self
+            .component::<Terminal>()
+            .and_then(|terminal| terminal.read().unwrap().next_blink());
+
+        event_loop.set_control_flow(match deadline {
+            Some(deadline) => ControlFlow::WaitUntil(deadline),
+            None => ControlFlow::Wait,
+        });
     }
 
     fn window_event(
