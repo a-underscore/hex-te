@@ -26,7 +26,7 @@ use winit::event_loop::EventLoop;
 
 use crate::app::{App, UserEvent};
 
-pub(crate) const WINDOW_TITLE: &str = "hex-te";
+pub(crate) const WINDOW_TITLE: &str = "hext";
 
 fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;

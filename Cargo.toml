@@ -1,5 +1,5 @@
 [package]
-name = "hex-te"
+name = "hext"
 version = "0.1.0"
 edition = "2024"
 description = "A minimal GPU-accelerated terminal emulator template built on wgpu"

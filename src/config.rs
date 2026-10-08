@@ -47,7 +47,7 @@ impl Default for Config {
 
 /// Written on first run. Since the loader keeps its default for anything missing
 /// or invalid, this doubles as the documentation for the file.
-const DEFAULT_CONFIG: &str = r#"# hex-te configuration.
+const DEFAULT_CONFIG: &str = r#"# hext configuration.
 #
 # This file is Python: the host evaluates it with an embedded interpreter, so
 # anything that produces the right value works. Every name is optional, and one
@@ -87,8 +87,8 @@ cursor_color = (0.16, 0.72, 0.72)
 "#;
 
 impl Config {
-    /// Where the config lives: `$XDG_CONFIG_HOME/hex-te/config.py`, or
-    /// `$HOME/.config/hex-te/config.py` when `XDG_CONFIG_HOME` is unset.
+    /// Where the config lives: `$XDG_CONFIG_HOME/hext/config.py`, or
+    /// `$HOME/.config/hext/config.py` when `XDG_CONFIG_HOME` is unset.
     pub fn path() -> anyhow::Result<PathBuf> {
         let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|dir| !dir.is_empty()) {
             Some(dir) => PathBuf::from(dir),
@@ -99,7 +99,7 @@ impl Config {
             .join(".config"),
         };
 
-        Ok(base.join("hex-te").join("config.py"))
+        Ok(base.join("hext").join("config.py"))
     }
 
     /// Reads the config, creating it from [`DEFAULT_CONFIG`] if it is not there
@@ -296,7 +296,7 @@ mod tests {
 
     /// A private directory to write test configs into.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("hex-te-config-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("hext-config-{}-{name}", std::process::id()));
 
         let _ = std::fs::remove_dir_all(&dir);
 

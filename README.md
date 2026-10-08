@@ -1,4 +1,4 @@
-# hex-te
+# hext
 
 A GPU-rendered terminal emulator in Rust, built on `winit` and `wgpu`.
 
@@ -41,7 +41,7 @@ mouse reporting, and text selection.
 ## Configuration
 
 On first run the app writes a `config.py` into the config directory —
-`$XDG_CONFIG_HOME/hex-te/config.py`, or `~/.config/hex-te/config.py` when
+`$XDG_CONFIG_HOME/hext/config.py`, or `~/.config/hext/config.py` when
 `XDG_CONFIG_HOME` is unset — and evaluates it with an embedded Python interpreter
 (`pyo3`), so the file is Python and a value can be computed rather than written
 out; a file that cannot be evaluated is reported instead of stopping the
