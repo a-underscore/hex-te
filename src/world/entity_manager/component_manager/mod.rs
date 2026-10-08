@@ -2,7 +2,7 @@ pub mod component_manager_trait;
 
 pub use component_manager_trait::ComponentManagerTrait;
 
-use crate::Id;
+use crate::id::Id;
 
 use std::{
     any::Any,

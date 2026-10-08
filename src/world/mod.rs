@@ -11,8 +11,8 @@ use std::sync::{Arc, RwLock};
 
 use nalgebra::Vector3;
 
-use crate::Id;
 use crate::components::{Camera3, Tag, Trans3};
+use crate::id::Id;
 
 /// Shared world state. The [`EntityManager`] holds every entity and its
 /// components; the ambient fields feed the 3D lighting pass so scenes are
@@ -70,11 +70,21 @@ impl World {
 
     /// Attaches a component to an entity.
     ///
-    /// Components are built as `Arc<RwLock<C>>` (see [`Trans3::new`]), so this
-    /// is the only place that has to reach into the component managers:
-    /// callers hold a world and nothing else.
+    /// Components the engine builds already come as `Arc<RwLock<C>>` (see
+    /// [`Trans3::new`]), so this is the only place that has to reach into the
+    /// component managers: callers hold a world and nothing else.
     pub fn attach<C: Send + Sync + 'static>(&self, eid: Id, component: Arc<RwLock<C>>) {
         self.em.write().unwrap().add_component(eid, component);
+    }
+
+    /// Attaches a component built as a plain value, handing back the handle the
+    /// rest of the code uses to reach it.
+    pub fn attach_value<C: Send + Sync + 'static>(&self, eid: Id, value: C) -> Arc<RwLock<C>> {
+        let component = Arc::new(RwLock::new(value));
+
+        self.attach(eid, Arc::clone(&component));
+
+        component
     }
 
     /// Detaches an entity's component of type `C`, if it has one.

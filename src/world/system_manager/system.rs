@@ -1,4 +1,5 @@
-use crate::{Control, World};
+use crate::control::Control;
+use crate::world::World;
 
 use std::sync::{Arc, RwLock};
 

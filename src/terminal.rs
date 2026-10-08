@@ -1,57 +1,42 @@
+use crate::font::Font;
 use crate::pty::{INITIAL_COLS, INITIAL_ROWS};
 use crate::{WINDOW_TITLE, gpu::Gpu};
-use fontdue::Font;
+use std::sync::{Arc, RwLock};
 use vte::{Params, Perform};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
-#[derive(Default)]
 pub(crate) struct Terminal {
     pub cursor_position: (usize, usize),
     pub cursor_size: (f32, f32),
     pub size: (usize, usize),
-    pub font_size: f32,
     pub last_texture_size: wgpu::Extent3d,
-    pub font: Option<Font>,
     pub texture: Option<wgpu::Texture>,
+    /// A handle to the font component rather than a copy of it: the grid asks it
+    /// for advances and glyph bitmaps, and nothing else owns those settings.
+    font: Arc<RwLock<Font>>,
     screen: Screen,
     parser: vte::Parser,
 }
 
 impl Terminal {
-    pub(crate) fn new() -> anyhow::Result<Self> {
-        let mut database = fontdb::Database::new();
-        database.load_system_fonts();
-
-        let font = database
-            .faces()
-            .filter(|face| face.monospaced)
-            .find_map(|face| {
-                database
-                    .with_face_data(face.id, |data, face_index| {
-                        Font::from_bytes(
-                            data,
-                            fontdue::FontSettings {
-                                collection_index: face_index,
-                                ..Default::default()
-                            },
-                        )
-                        .ok()
-                    })
-                    .flatten()
-            })
-            .ok_or_else(|| anyhow::anyhow!("no usable monospace font found"))?;
-        let font_size = 16.0;
-        let cell_width = font.metrics('a', font_size).advance_width;
-        let cell_height = font
-            .horizontal_line_metrics(font_size)
-            .expect("horizontal font")
-            .new_line_size;
+    /// `font` is expected to be the world's font component, so the grid and
+    /// anything else drawing with the same face share one instance.
+    pub(crate) fn new(font: Arc<RwLock<Font>>) -> Self {
+        let cursor_size = font.read().unwrap().cell();
 
         let mut terminal = Self {
-            font: Some(font),
-            font_size,
-            cursor_size: (cell_width, cell_height),
-            ..Default::default()
+            cursor_position: (0, 0),
+            cursor_size,
+            size: (0, 0),
+            last_texture_size: wgpu::Extent3d {
+                width: 0,
+                height: 0,
+                depth_or_array_layers: 1,
+            },
+            texture: None,
+            font,
+            screen: Screen::default(),
+            parser: vte::Parser::new(),
         };
 
         // Anything the shell writes before the first frame is parsed into this
@@ -61,7 +46,7 @@ impl Terminal {
             .screen
             .resize(INITIAL_COLS as usize, INITIAL_ROWS as usize);
 
-        Ok(terminal)
+        terminal
     }
 
     pub(crate) fn update_layout(&mut self, gpu: &Gpu, width: u32, height: u32) -> bool {
@@ -131,14 +116,10 @@ impl Terminal {
     }
 
     fn update_grid_size(&mut self, width: usize, height: usize) {
-        let Some(font) = self.font.as_ref() else {
-            return;
+        let (cell_width, cell_height) = {
+            let font = self.font.read().unwrap();
+            font.cell()
         };
-        let cell_width = font.metrics('a', self.font_size).advance_width.max(1.0);
-        let Some(line) = font.horizontal_line_metrics(self.font_size) else {
-            return;
-        };
-        let cell_height = line.new_line_size.max(1.0);
 
         self.cursor_size = (cell_width, cell_height);
         self.size = (
@@ -152,16 +133,14 @@ impl Terminal {
     fn rasterize(&self, w: usize, h: usize) -> Vec<u8> {
         let mut buffer = vec![0u8; w * h * 4];
 
-        let Some(font) = self.font.as_ref() else {
-            return buffer;
-        };
-
         let (cols, rows) = self.size;
         let (cell_width, cell_height) = self.cursor_size;
         if cols == 0 || rows == 0 || cell_width <= 0.0 || cell_height <= 0.0 {
             return buffer;
         }
-        let Some(line) = font.horizontal_line_metrics(self.font_size) else {
+
+        let font = self.font.read().unwrap();
+        let Some(line) = font.line_metrics() else {
             return buffer;
         };
 
@@ -174,7 +153,7 @@ impl Terminal {
                     continue;
                 }
 
-                let (metrics, bitmap) = font.rasterize(ch, self.font_size);
+                let (metrics, bitmap) = font.rasterize(ch);
 
                 if metrics.width == 0 || metrics.height == 0 {
                     continue;
@@ -566,9 +545,17 @@ fn with_alt(mut bytes: Vec<u8>, modifiers: ModifiersState) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Screen, Terminal, encode_key};
+    use super::{Font, Screen, Terminal, encode_key};
+    use std::sync::{Arc, RwLock};
     use vte::Parser;
     use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+    /// A terminal over the system's monospace font, as the app builds it.
+    fn terminal() -> Terminal {
+        let font = Font::load().expect("a system monospace font");
+
+        Terminal::new(Arc::new(RwLock::new(font)))
+    }
 
     /// Feeds `bytes` through a real VT parser into a fresh `cols` x `rows` grid.
     fn screen(cols: usize, rows: usize, bytes: &[u8]) -> Screen {
@@ -656,7 +643,7 @@ mod tests {
 
     #[test]
     fn configured_terminal_draws_what_the_shell_wrote() {
-        let mut terminal = Terminal::new().expect("a system monospace font");
+        let mut terminal = terminal();
         terminal.update_grid_size(256, 64);
         terminal.feed(b"A");
 
@@ -667,7 +654,7 @@ mod tests {
 
     #[test]
     fn resizing_rebuilds_the_grid_without_losing_the_text() {
-        let mut terminal = Terminal::new().expect("a system monospace font");
+        let mut terminal = terminal();
         terminal.update_grid_size(1024, 640);
         terminal.feed(b"ab\tc\r\nX");
 

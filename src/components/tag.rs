@@ -1,4 +1,4 @@
-use crate::Id;
+use crate::id::Id;
 use crate::world::EntityManager;
 
 use std::sync::{Arc, RwLock};

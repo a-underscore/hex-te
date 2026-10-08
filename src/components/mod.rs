@@ -8,7 +8,7 @@ pub use camera3::Camera3;
 pub use tag::Tag;
 pub use trans3::Trans3;
 
-use crate::nalgebra::Matrix4;
+use nalgebra::Matrix4;
 
 pub mod camera3;
 pub mod tag;

@@ -23,6 +23,9 @@ cargo test
 - Resizes the PTY (`SIGWINCH`) to match the grid, and recomputes the grid from the
   window dimensions and font metrics on every redraw.
 - Closes the window when the shell exits.
+- Holds its own resources — the GPU, the font, the grid and the shell — as
+  components of one entity in an entity-component world, and handles events in a
+  system that borrows them from the world.
 
 Not implemented yet: SGR colours and attributes, wide (CJK) double-width cells,
 scrollback, the alternate screen, mouse reporting, and text selection.
@@ -32,10 +35,15 @@ scrollback, the alternate screen, mouse reporting, and text selection.
 | File | Responsibility |
 | --- | --- |
 | `src/main.rs` | Creates the event loop, its user-event channel, and the application |
-| `src/app.rs` | Owns the window, PTY, and grid; dispatches input, output, and redraw events |
+| `src/app.rs` | The winit glue: turns events into `Control` values and runs them through the systems |
 | `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
 | `src/terminal.rs` | The VT parser and character grid, key encoding, and glyph rasterization |
+| `src/font.rs` | Loads the system monospace face and answers rasterization requests |
 | `src/gpu.rs` | Configures the surface and renders the texture and cursor |
+| `src/world/` | The ported engine: the entity/component store and the system manager |
+| `src/components/` | The ported 3D components: `Camera3`, `Trans3`, `Tag` |
+| `src/control.rs` | The event value a system is handed each turn, plus its `exit` flag |
+| `src/id.rs` | The `Id` entity handle |
 | `src/shaders/screen.wgsl` | Draws the screen texture and cursor overlay |
 
 Data flows one way around the loop: keystrokes are encoded and written to the PTY,
@@ -43,28 +51,38 @@ the shell echoes and prints, the reader thread collects the bytes and wakes the
 event loop, and the VT parser turns them into grid cells that `rasterize` uploads
 as a texture.
 
-## Library target (engine port)
+## Engine core (ported from `hex`)
 
-Besides the terminal binary, the package builds a library (`src/lib.rs`) holding
-the engine core being ported from the Vulkano project in `../hex`:
+This is a single crate: the engine being ported from the Vulkano project in
+`../hex` lives in `src/world/` and `src/components/`, and the terminal's own
+resources are components of that same world.
+
+The app owns exactly one entity, to which `Gpu`, `Font`, `Terminal` and `Pty` are
+attached. Its behaviour is a single `System` (`TerminalSystem` in `src/app.rs`)
+handed `(Control, World)` for every event; it borrows the components it needs out
+of the world instead of storing them. `World::spawn`, `attach`, `attach_value`,
+`component` and friends exist so callers pass a world rather than an entity
+manager plus every component.
 
 | Module | Notes |
 | --- | --- |
 | `world::World` | Entity-component store plus the global ambient lighting values |
-| `components` | `Camera3`, `Trans3`, `Tag`; `Light3`/`Model` follow once the renderer does |
-| `control::Control` | The winit event plus an `exit` flag, handed to each system |
-| `world::System` | `init`/`update` units of per-frame behaviour, and their manager |
+| `world::{EntityManager, ComponentManager}` | Type-erased component storage behind `Arc<RwLock<C>>` |
+| `world::{System, SystemManager}` | `init`/`update` units of behaviour, run in registration order |
+| `control::Control` | The winit event plus an `exit` flag; a system sets `exit` to stop the loop |
+| `components` | The engine's own components, so far unused by the terminal: `Camera3`, `Trans3`, `Tag` |
 
-Anything a system needs is expected to live in the world, so a system is handed
-the world (and the event) instead of a list of parameters — `World::spawn`,
-`attach`, `component` and friends exist so callers hold a world rather than an
-entity manager plus every component. The ambient values come out as
-`world::AmbientUniform`, a padding-free `bytemuck::Pod` struct ready for
-`Queue::write_buffer`; that layout is the one part that had to change from the
-Vulkano original, which wrote a descriptor subbuffer.
+Two things are deliberately different from `hex` because the GPU API is: the
+ambient values are handed over as `world::AmbientUniform`, a padding-free
+`bytemuck::Pod` struct ready for `Queue::write_buffer` (the Vulkano original wrote
+a descriptor subbuffer), and camera projections get a depth-only clip-space
+correction, since wgpu's Y axis — unlike Vulkan's — already points up.
+
+`Light3`, `Model` and `hex`'s `renderables/` and `renderers/` are still Vulkano
+code and follow once the 3D renderer is ported.
 
 The port lives on the `dev` branch; `master` still tracks the terminal-only
-history, and the terminal binary does not use the library yet.
+history.
 
 ## Requirements
 

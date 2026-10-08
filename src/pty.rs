@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::sync::Mutex;
 use std::thread;
 
 use anyhow::Error;
@@ -12,11 +13,16 @@ pub(crate) const INITIAL_ROWS: u16 = 24;
 /// How many bytes the reader thread asks for at a time.
 const READ_CHUNK: usize = 8192;
 
+/// A shell running on its own pty.
+///
+/// `portable_pty`'s master, writer and child are only `Send`, so each one sits
+/// behind a mutex: that is what makes a `Pty` a legal ECS component, whose bound
+/// is `Send + Sync`. Every method therefore takes `&self`.
 pub(crate) struct Pty {
-    pair: PtyPair,
-    pub child: Box<dyn portable_pty::Child + Send>,
-    writer: Box<dyn Write + Send>,
-    size: (u16, u16),
+    pair: Mutex<PtyPair>,
+    child: Mutex<Box<dyn portable_pty::Child + Send>>,
+    writer: Mutex<Box<dyn Write + Send>>,
+    size: Mutex<(u16, u16)>,
 }
 
 impl Pty {
@@ -58,38 +64,52 @@ impl Pty {
             })?;
 
         Ok(Self {
-            pair,
-            child,
-            writer,
-            size: (INITIAL_COLS, INITIAL_ROWS),
+            pair: Mutex::new(pair),
+            child: Mutex::new(child),
+            writer: Mutex::new(writer),
+            size: Mutex::new((INITIAL_COLS, INITIAL_ROWS)),
         })
     }
 
     /// Forwards bytes to the shell as if they had been typed.
-    pub fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()?;
+    pub fn write(&self, bytes: &[u8]) -> Result<(), Error> {
+        let mut writer = self.writer.lock().unwrap();
+
+        writer.write_all(bytes)?;
+        writer.flush()?;
 
         Ok(())
     }
 
     /// Tells the shell how big the grid is so full-screen programs lay out
     /// correctly: the pty turns this into a `SIGWINCH` for the child.
-    pub fn resize(&mut self, cols: usize, rows: usize) -> Result<(), Error> {
+    pub fn resize(&self, cols: usize, rows: usize) -> Result<(), Error> {
         let cols = cols.min(u16::MAX as usize) as u16;
         let rows = rows.min(u16::MAX as usize) as u16;
 
-        if (cols, rows) == self.size || cols == 0 || rows == 0 {
-            return Ok(());
+        {
+            let mut size = self.size.lock().unwrap();
+
+            if (cols, rows) == *size || cols == 0 || rows == 0 {
+                return Ok(());
+            }
+
+            *size = (cols, rows);
         }
 
-        self.pair.master.resize(PtySize {
+        self.pair.lock().unwrap().master.resize(PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
         })?;
-        self.size = (cols, rows);
+
+        Ok(())
+    }
+
+    /// Kills the shell.
+    pub fn kill(&self) -> Result<(), Error> {
+        self.child.lock().unwrap().kill()?;
 
         Ok(())
     }
