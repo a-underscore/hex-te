@@ -136,7 +136,9 @@ The colour swatch again, from a later capture:
 Not implemented yet: wide (CJK) double-width cells, scrollback, the alternate
 screen, mouse reporting, and the second half of the Symbols for Legacy Computing
 block (the wedges and one-eighth blocks after `U+1FB3B`), and the rounded and
-half-height Powerline wedges (`U+E0B4` onwards).
+half-height Powerline wedges (`U+E0B4` onwards). The colours of the 16 ANSI
+palette are not settings yet either: a theme grades the colours a cell asks for
+in its shader, rather than replacing the palette the grid is painted with.
 
 ## Configuration
 
@@ -171,9 +173,31 @@ whether the loop keeps drawing, and the file is re-read when it is saved, so non
 of it needs a rebuild. A window manager is free to override the requested window
 size.
 
-`docs/config-aurora.py` is the worked example: an animated shader, and a render
-function that drifts the cursor colour from Python. Copy it over your own
-`config.py` and save it to see both.
+### Two examples
+
+`docs/` holds two whole configs. Either can be copied over your own `config.py`,
+and either can be saved again while hext is running:
+
+- `docs/config-aurora.py` — a night sky with bands of light drifting across it,
+  a vignette, scanlines, and a render function that walks the cursor colour
+  through the same greens as the sky. The example of animation from both sides at
+  once: the shader's clock and Python.
+- `docs/config-neon.py` — a synthwave sunset: a sliced sun, a floor grid marching
+  towards the viewer, stars, a slow flicker, and the shell's own colours graded
+  into the theme. The example of a *theme*.
+
+A theme in hext is a shader plus the colours the config owns, and the shader is
+the interesting half, because the grid carries the colours the shell asked for:
+the only place to re-colour a terminal is after the cells are drawn.
+`config-neon.py` does it by turning each cell's brightness into a walk through a
+three-stop ramp — deep violet, cyan, hot pink — so `ls`, a diff and a status line
+all come out in the theme. What survives the grade is brightness, and with it the
+reading order of the text: the brightest colour the shell uses is still the
+brightest thing on screen. The 16 ANSI colours are not settings, so a theme
+grades them rather than replacing them.
+
+Both examples are `animate = True`, and both are evaluated by `cargo test` with
+their shaders validated, so the ones the repository ships are known to build.
 
 ### A picture behind the grid
 

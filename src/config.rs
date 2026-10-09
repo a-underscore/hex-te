@@ -933,42 +933,53 @@ mod tests {
         );
     }
 
-    /// The example the repository ships, evaluated as a config and driven a
-    /// little, so a broken one is caught here rather than by a user.
+    /// The examples the repository ships, each evaluated as a config and driven
+    /// a little, so one that no longer works is caught here rather than by a user.
     #[test]
-    fn the_aurora_example_is_a_config_that_works() {
-        let path = scratch("aurora");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, include_str!("../docs/config-aurora.py")).unwrap();
+    fn the_example_configs_are_configs_that_work() {
+        let examples = [
+            ("aurora", include_str!("../docs/config-aurora.py")),
+            ("neon", include_str!("../docs/config-neon.py")),
+        ];
 
-        let world = world();
-        let config = Config::read_from(&path, Arc::clone(&world)).expect("the example config");
+        for (name, source) in examples {
+            let path = scratch(&format!("example-{name}"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, source).unwrap();
 
-        assert!(config.animate, "the example asks for a frame every frame");
+            let world = world();
+            let config =
+                Config::read_from(&path, Arc::clone(&world)).expect("the example config");
 
-        let shader = config.shader.expect("the example names a shader");
+            assert!(config.animate, "{name} asks for a frame every frame");
 
-        // The same front end wgpu compiles it with, so the shader the repository
-        // ships is known to build.
-        let module =
-            naga::front::wgsl::parse_str(&shader).expect("the example's shader must parse");
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
-        )
-        .validate(&module)
-        .expect("the example's shader must validate");
+            let shader = config
+                .shader
+                .unwrap_or_else(|| panic!("{name} names a shader"));
 
-        // Its render function runs, and finds no terminal to drift — which is
-        // what the app's own order does too: the file is read first.
-        let systems = world.read().unwrap().systems();
-        systems
-            .update_pipeline(
-                RENDER_PIPELINE,
-                Control::new(Event::AboutToWait),
-                Arc::clone(&world),
+            // The same front end wgpu compiles it with, so the shaders the
+            // repository ships are known to build.
+            let module = naga::front::wgsl::parse_str(&shader)
+                .unwrap_or_else(|error| panic!("{name}'s shader must parse: {error}"));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
             )
-            .unwrap();
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{name}'s shader must validate: {error}"));
+
+            // Whatever it registered runs, the way a frame runs it — and the
+            // aurora one finds no terminal to drift, which is what the app's own
+            // order does too: the file is read before the terminal is built.
+            let systems = world.read().unwrap().systems();
+            systems
+                .update_pipeline(
+                    RENDER_PIPELINE,
+                    Control::new(Event::AboutToWait),
+                    Arc::clone(&world),
+                )
+                .unwrap();
+        }
     }
 
     #[test]
