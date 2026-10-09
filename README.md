@@ -6,6 +6,14 @@ The grid is drawn on the CPU into a texture and composited on the GPU, and the
 look is a Python file: colours, the shader the screen is drawn with, and the two
 pictures that can go behind and in front of it.
 
+hext is moddable. The configuration file is Python, evaluated at startup by an
+embedded interpreter, so the look and the behaviour are both something a user
+edits rather than something baked into the binary: the colours and the shader,
+the pictures behind and in front of the grid, systems that shape the running app
+on every event, and render functions that run once per frame with the frame about
+to be drawn. Nothing above the shell needs a rebuild to change — see
+[Configuration](#configuration).
+
 ```sh
 cargo run   # the terminal
 cargo test  # unit and shader tests
