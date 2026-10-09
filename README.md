@@ -281,8 +281,6 @@ the components the terminal draws with are not exposed to Python yet.
 | `src/config.rs` | Writes and evaluates the Python `config.py` through `pyo3` |
 | `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
 | `src/clipboard.rs` | The system clipboard a selection is copied to, held for the life of the app |
-| `src/control.rs` | The event value a system is handed each turn, plus its `exit` flag |
-| `src/id.rs` | The `Id` entity handle |
 | `src/terminal/` | The grid and everything that fills it |
 | `src/terminal/mod.rs` | The VT parser and character grid, key encoding, and the rasterizer that paints cells and glyphs into the screen texture, as ink on nothing |
 | `src/terminal/glyphs.rs` | The characters the terminal draws itself, out of the cell's rectangle: box drawing, blocks, braille, sextants and the Powerline wedges |
@@ -292,7 +290,10 @@ the components the terminal draws with are not exposed to Python yet.
 | `src/render/gpu.rs` | Owns the window, the surface, the device and the drawable, and drives one frame |
 | `src/render/drawable.rs` | The draw a frame ends with: the screen pipeline, the bind group, the uniform, the picture behind the grid, and the render systems a config file can add |
 | `src/render/shaders/screen.wgsl` | Composites the grid over the background picture and draws the cursor overlay |
-| `src/world/` | The entity-component world: the entity store, the system manager, and the ambient values |
+| `src/world/` | The entity-component world |
+| `src/world/mod.rs` | The entity and system managers, the ambient values, and the pipeline numbers |
+| `src/world/control.rs` | The event value a system is handed each turn, plus its `exit` flag |
+| `src/world/id.rs` | The `Id` entity handle |
 
 Data flows one way around the loop: keystrokes are encoded and written to the PTY,
 the shell echoes and prints, the reader thread collects the bytes and wakes the
@@ -323,7 +324,7 @@ systems registered from the config file do exactly that.
 | `world::{EntityManager, ComponentManager}` | Type-erased component storage behind `Arc<RwLock<C>>` |
 | `world::{System, SystemManager}` | `init`/`update` units of behaviour, added in order and run from a snapshot; `update_pipeline` runs one pipeline on its own |
 | `world::{EVENT_PIPELINE, RENDER_PIPELINE}` | The pipeline the events go to, and the one a frame runs |
-| `control::Control` | The winit event plus an `exit` flag; a system sets `exit` to stop the loop |
+| `world::Control` | The winit event plus an `exit` flag; a system sets `exit` to stop the loop |
 
 The ambient values reach a renderer as `world::AmbientUniform`: a padding-free
 `bytemuck::Pod` struct laid out for a `vec3` plus an `f32`, ready for

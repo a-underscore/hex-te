@@ -2,9 +2,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use nalgebra::Vector3;
 
-use crate::control::Control;
-use crate::id::Id;
-use crate::world::{EVENT_PIPELINE, System, World};
+use crate::world::{Control, EVENT_PIPELINE, Id, System, World};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,

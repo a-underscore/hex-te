@@ -14,9 +14,7 @@ use pyo3::types::PyDict;
 
 use crate::WINDOW_TITLE;
 use crate::app::UserEvent;
-use crate::control::Control;
-use crate::id::Id;
-use crate::world::{RENDER_PIPELINE, System, World};
+use crate::world::{Control, Id, RENDER_PIPELINE, System, World};
 
 /// The settings the app reads, and what it uses when the file does not say.
 #[derive(Clone)]
@@ -383,8 +381,7 @@ impl System<UserEvent> for PySystem {
 mod tests {
     use super::Config;
     use crate::app::UserEvent;
-    use crate::control::Control;
-    use crate::world::{EVENT_PIPELINE, RENDER_PIPELINE, World};
+    use crate::world::{Control, EVENT_PIPELINE, RENDER_PIPELINE, World};
 
     use nalgebra::Vector3;
     use winit::event::Event;

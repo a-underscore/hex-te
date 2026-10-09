@@ -2,9 +2,7 @@ pub mod system;
 
 pub use system::System;
 
-use crate::control::Control;
-use crate::id::Id;
-use crate::world::World;
+use crate::world::{Control, Id, World};
 
 use std::{
     collections::HashMap,
@@ -142,8 +140,7 @@ impl<E: 'static> SystemManager<E> {
 #[cfg(test)]
 mod tests {
     use super::{System, SystemManager};
-    use crate::control::Control;
-    use crate::world::World;
+    use crate::world::{Control, World};
 
     use std::sync::{Arc, Mutex, RwLock};
 

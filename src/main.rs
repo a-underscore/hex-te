@@ -4,20 +4,21 @@
 //! Everything the app needs lives in one entity-component [`world`]:
 //! [`render::Gpu`], [`terminal::font::Font`], [`terminal::Terminal`] and
 //! [`pty::Pty`] are components of one entity, and the behaviour is a system that
-//! borrows them back out of the world. [`control`] is the event value a system is
-//! handed each turn. Keeping them in one crate is what lets the resources and the
-//! behaviour share that world without a library target in between.
+//! borrows them back out of the world. [`world::Control`] is the event value a
+//! system is handed each turn. Keeping them in one crate is what lets the
+//! resources and the behaviour share that world without a library target in
+//! between.
 //!
 //! The modules are grouped by what they own: [`terminal`] is the grid and
 //! everything that fills it — the font it is drawn with and the glyphs the
-//! terminal draws itself — and [`render`] is the window, the device and the
-//! screen draw.
+//! terminal draws itself — [`render`] is the window, the device and the screen
+//! draw, and [`world`] is the entity-component core. What is left at the root is
+//! the app itself: its entry point, its winit glue, the config file it reads and
+//! the two things outside the process it holds, the shell and the clipboard.
 
 mod app;
 mod clipboard;
 mod config;
-mod control;
-mod id;
 mod pty;
 mod render;
 mod terminal;

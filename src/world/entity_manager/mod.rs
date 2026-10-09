@@ -2,7 +2,7 @@ pub mod component_manager;
 
 pub use component_manager::ComponentManager;
 
-use crate::id::Id;
+use crate::world::Id;
 use component_manager::ComponentManagerTrait;
 
 use std::{

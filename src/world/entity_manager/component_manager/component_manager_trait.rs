@@ -1,4 +1,4 @@
-use crate::id::Id;
+use crate::world::Id;
 
 use std::any::Any;
 

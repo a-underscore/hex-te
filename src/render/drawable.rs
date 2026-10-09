@@ -14,9 +14,8 @@ use anyhow::anyhow;
 use winit::event::Event;
 
 use crate::WINDOW_TITLE;
-use crate::control::Control;
 use crate::terminal::{Terminal, srgb};
-use crate::world::{RENDER_PIPELINE, SystemManager, World};
+use crate::world::{Control, RENDER_PIPELINE, SystemManager, World};
 
 const SCREEN_SHADER: &str = include_str!("shaders/screen.wgsl");
 

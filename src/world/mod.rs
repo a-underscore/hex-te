@@ -1,17 +1,20 @@
 //! The entity-component world: an [`EntityManager`] and a [`SystemManager`],
-//! plus global lighting values that apply to every rendered frame.
+//! the [`Id`] handle and the [`Control`] value a system is handed, plus global
+//! lighting values that apply to every rendered frame.
 
+pub mod control;
 pub mod entity_manager;
+pub mod id;
 pub mod system_manager;
 
+pub use control::Control;
 pub use entity_manager::EntityManager;
+pub use id::Id;
 pub use system_manager::{System, SystemManager};
 
 use std::sync::{Arc, RwLock};
 
 use nalgebra::Vector3;
-
-use crate::id::Id;
 
 /// The pipeline the application's own systems live in: the ones that handle the
 /// events the event loop dispatches.
@@ -174,7 +177,7 @@ pub struct AmbientUniform {
 #[cfg(test)]
 mod tests {
     use super::{AmbientUniform, System, World};
-    use crate::control::Control;
+    use crate::world::Control;
     use nalgebra::Vector3;
     use winit::event::Event;
 
