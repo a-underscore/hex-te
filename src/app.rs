@@ -17,9 +17,9 @@ use winit::{
 use crate::WINDOW_TITLE;
 use crate::clipboard::Clipboard;
 use crate::config::Config;
-use crate::font::Font;
-use crate::gpu::Gpu;
 use crate::pty::Pty;
+use crate::render::Gpu;
+use crate::terminal::font::Font;
 use crate::terminal::{KeyModes, Terminal, encode_key};
 
 /// Wakes the event loop back up when the shell has something to say.

@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use winit::window::Window;
 
 use crate::WINDOW_TITLE;
-use crate::drawable::Drawable;
+use crate::render::Drawable;
 use crate::terminal::Terminal;
 use crate::world::{SystemManager, World};
 

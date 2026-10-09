@@ -1,7 +1,7 @@
 //! The screen draw: the pipeline, the bind group and the uniform a frame ends
 //! with, plus the render systems a config file can add to it.
 //!
-//! [`Gpu`](crate::gpu::Gpu) owns one of these and hands it a frame it has just
+//! [`Gpu`](crate::render::Gpu) owns one of these and hands it a frame it has just
 //! set up; the drawable finishes it. Everything the screen is drawn with lives
 //! here, which leaves the render command itself with the frame's own business:
 //! asking the surface for an image, laying the grid out, and presenting.
@@ -33,7 +33,8 @@ fn screen_shader(source: Option<&str>) -> Cow<'static, str> {
 }
 
 // The shaped cursor the pipeline starts with, before a shell asks for another
-// one with `DECSCUSR`; the numbers are what `src/shaders/screen.wgsl` matches on.
+// one with `DECSCUSR`; the numbers are what `src/render/shaders/screen.wgsl`
+// matches on.
 const CURSOR_BLOCK: u32 = 0;
 
 #[repr(C)]
@@ -447,8 +448,8 @@ mod tests {
         CURSOR_BLOCK, SCREEN_SHADER, ScreenUniforms, background_pixel, load_background,
         screen_shader,
     };
-    use crate::font::Font;
     use crate::terminal::Terminal;
+    use crate::terminal::font::Font;
 
     use std::sync::{Arc, RwLock};
 

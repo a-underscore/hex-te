@@ -1,6 +1,6 @@
 #[test]
 fn screen_shader_parses_and_validates() {
-    let source = include_str!("../src/shaders/screen.wgsl");
+    let source = include_str!("../src/render/shaders/screen.wgsl");
     let module = naga::front::wgsl::parse_str(source).expect("the screen shader must parse");
 
     for entry in ["vs_screen", "fs_screen"] {

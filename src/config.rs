@@ -80,8 +80,8 @@ cursor_color = (0.16, 0.72, 0.72)
 
 # The screen shader, as WGSL source: the shader the terminal draws with is part
 # of this file. It needs the `vs_screen` and `fs_screen` entry points and the
-# bindings `src/shaders/screen.wgsl` uses, which is also what `None` falls back
-# to. Because this is Python, a file can be read instead of pasted:
+# bindings `src/render/shaders/screen.wgsl` uses, which is also what `None` falls
+# back to. Because this is Python, a file can be read instead of pasted:
 #
 #     shader = open("/home/you/.config/hext/crt.wgsl").read()
 shader = None

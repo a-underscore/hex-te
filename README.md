@@ -182,7 +182,7 @@ app does not know which ones it will find:
 | `@group(0) @binding(3)` | The `background_image` picture, stretched over the window — or one pixel of `background` when the config named none |
 
 `vs_screen` draws one fullscreen triangle from `@builtin(vertex_index)` and
-`fs_screen` returns a colour for `@builtin(position)`. `src/shaders/screen.wgsl`
+`fs_screen` returns a colour for `@builtin(position)`. `src/render/shaders/screen.wgsl`
 is the reference — and the shader `None` falls back to — so the usual way to write
 one is to copy it and change what you like. Since the config is Python, a file can
 be read instead of pasted:
@@ -249,10 +249,10 @@ system added while they run joins the next event, not the one in progress.
 ### Render functions
 
 A system added to the `render_pipeline` pipeline runs once per frame instead, at
-the point the frame is finished: the `Drawable` in `src/drawable.rs` runs that
-pipeline and then draws the screen over the image the frame cleared. It is the
-same world and the same kind of function, so a config file can say what a frame
-does:
+the point the frame is finished: the `Drawable` in `src/render/drawable.rs` runs
+that pipeline and then draws the screen over the image the frame cleared. It is
+the same world and the same kind of function, so a config file can say what a
+frame does:
 
 ```python
 frames = 0
@@ -281,15 +281,18 @@ the components the terminal draws with are not exposed to Python yet.
 | `src/config.rs` | Writes and evaluates the Python `config.py` through `pyo3` |
 | `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
 | `src/clipboard.rs` | The system clipboard a selection is copied to, held for the life of the app |
-| `src/terminal.rs` | The VT parser and character grid, key encoding, and the rasterizer that paints cells and glyphs into the screen texture, as ink on nothing |
-| `src/glyphs.rs` | The characters the terminal draws itself, out of the cell's rectangle: box drawing, blocks, braille, sextants and the Powerline wedges |
-| `src/font.rs` | Loads the system monospace family — regular, bold and italic — and answers rasterization requests |
-| `src/gpu.rs` | Owns the window, the surface, the device and the drawable, and drives one frame |
-| `src/drawable.rs` | The draw a frame ends with: the screen pipeline, the bind group, the uniform, the picture behind the grid, and the render systems a config file can add |
-| `src/world/` | The entity-component world: the entity store, the system manager, and the ambient values |
 | `src/control.rs` | The event value a system is handed each turn, plus its `exit` flag |
 | `src/id.rs` | The `Id` entity handle |
-| `src/shaders/screen.wgsl` | Composites the grid over the background picture and draws the cursor overlay |
+| `src/terminal/` | The grid and everything that fills it |
+| `src/terminal/mod.rs` | The VT parser and character grid, key encoding, and the rasterizer that paints cells and glyphs into the screen texture, as ink on nothing |
+| `src/terminal/glyphs.rs` | The characters the terminal draws itself, out of the cell's rectangle: box drawing, blocks, braille, sextants and the Powerline wedges |
+| `src/terminal/font.rs` | Loads the system monospace family — regular, bold and italic — and answers rasterization requests |
+| `src/render/` | Everything that draws |
+| `src/render/mod.rs` | Groups the two and re-exports `Gpu` and `Drawable`; the only place that mentions wgpu |
+| `src/render/gpu.rs` | Owns the window, the surface, the device and the drawable, and drives one frame |
+| `src/render/drawable.rs` | The draw a frame ends with: the screen pipeline, the bind group, the uniform, the picture behind the grid, and the render systems a config file can add |
+| `src/render/shaders/screen.wgsl` | Composites the grid over the background picture and draws the cursor overlay |
+| `src/world/` | The entity-component world: the entity store, the system manager, and the ambient values |
 
 Data flows one way around the loop: keystrokes are encoded and written to the PTY,
 the shell echoes and prints, the reader thread collects the bytes and wakes the

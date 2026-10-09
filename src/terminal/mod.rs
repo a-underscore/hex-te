@@ -1,7 +1,15 @@
-use crate::font::Font;
-use crate::glyphs::{self, Rect};
+//! The character grid and everything that fills it: the VT parser, the key
+//! encoding, the font the grid is drawn with, the glyphs the terminal draws
+//! itself, and the rasterizer that turns the grid into the texture the renderer
+//! composites.
+
+pub(crate) mod font;
+pub(crate) mod glyphs;
+
+use self::font::Font;
+use self::glyphs::Rect;
 use crate::pty::{INITIAL_COLS, INITIAL_ROWS};
-use crate::{WINDOW_TITLE, gpu::Gpu};
+use crate::{WINDOW_TITLE, render::Gpu};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use vte::{Params, Perform};
