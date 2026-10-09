@@ -8,5 +8,5 @@
 pub(crate) mod drawable;
 pub(crate) mod gpu;
 
-pub(crate) use drawable::Drawable;
+pub(crate) use drawable::{Drawable, Pictures};
 pub(crate) use gpu::Gpu;

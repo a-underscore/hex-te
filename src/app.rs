@@ -16,7 +16,7 @@ use crate::WINDOW_TITLE;
 use crate::clipboard::Clipboard;
 use crate::config::Config;
 use crate::pty::Pty;
-use crate::render::Gpu;
+use crate::render::{Gpu, Pictures};
 use crate::terminal::font::Font;
 use crate::terminal::{KeyModes, Terminal, encode_key};
 
@@ -481,7 +481,10 @@ impl ApplicationHandler<UserEvent> for App {
             config.background,
             config.cursor_color,
             config.shader.as_deref(),
-            config.background_image.as_deref(),
+            Pictures {
+                background: config.background_image.as_deref(),
+                foreground: config.foreground_image.as_deref(),
+            },
         )) {
             Ok(gpu) => gpu,
             Err(error) => {

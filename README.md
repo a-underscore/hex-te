@@ -107,6 +107,9 @@ The colour swatch again, from a later capture:
   each pixel the grid covers in its alpha, so a picture named by
   `background_image` shows through every cell a program left unpainted, and a
   cell that asked for a colour of its own covers it.
+- Puts a second picture over all of it: `foreground_image` is drawn last, over
+  the text, the selection and the cursor, which is where the glass of a CRT — a
+  shadow mask, a grille, a glare — belongs.
 
 Not implemented yet: wide (CJK) double-width cells, scrollback, the alternate
 screen, mouse reporting, and the second half of the Symbols for Legacy Computing
@@ -132,13 +135,14 @@ These are the names the file documents:
 | `background`, `cursor_color` | Colours, as `(r, g, b)` floats in `0.0..=1.0` |
 | `shader` | The WGSL the screen is drawn with, as source; `None` keeps the built-in one |
 | `background_image` | A PNG or JPEG to draw behind the grid; `None` keeps the `background` colour |
+| `foreground_image` | A PNG or JPEG to draw over everything; `None` is no overlay |
 
-`shader` and `background_image` are the settings that are applied today: the app
-builds the screen pipeline from that source and loads that picture, so both are
-part of `config.py` and changing them is a restart rather than a rebuild. The
-rest of the names above are documented but not read back yet. The file is read
-once, when the app starts, so restart it to pick up an edit; a window manager is
-free to override the requested window size.
+`shader`, `background_image` and `foreground_image` are the settings that are
+applied today: the app builds the screen pipeline from that source and loads
+those two pictures, so all three are part of `config.py` and changing them is a
+restart rather than a rebuild. The rest of the names above are documented but not
+read back yet. The file is read once, when the app starts, so restart it to pick
+up an edit; a window manager is free to override the requested window size.
 
 ### A picture behind the grid
 
@@ -155,6 +159,19 @@ that asked for a colour of its own — stay opaque on top of the picture.
 
 A picture that cannot be read is reported and the `background` colour used
 instead, the way a config file that cannot be evaluated keeps the defaults.
+
+### A picture over the grid
+
+`foreground_image` is the other side of the same idea: a picture stretched over
+the window and drawn over *everything* — text, selection and cursor included.
+Where it is transparent the screen shows through, so it is a PNG with an alpha
+channel: a shadow mask, a grille, a sheet of glare, a scratch on the glass.
+
+One overlay covers the whole window at once, so a mask is stretched rather than
+repeated: at these cell sizes (about ten by eighteen pixels) a grille drawn at
+one line every third source pixel comes out as a fine weave over the text, and
+anything much stronger than a quarter of the way to black will eat into the
+glyphs instead of tinting them.
 
 ### Custom shaders
 
@@ -180,6 +197,7 @@ app does not know which ones it will find:
 | `@group(0) @binding(1)` | The screen texture: the grid as ink, in sRGB bytes, with the alpha saying how much of each pixel a cell covers |
 | `@group(0) @binding(2)` | A sampler for that texture |
 | `@group(0) @binding(3)` | The `background_image` picture, stretched over the window — or one pixel of `background` when the config named none |
+| `@group(0) @binding(4)` | The `foreground_image` picture, stretched the same way — or one transparent pixel when the config named none |
 
 `vs_screen` draws one fullscreen triangle from `@builtin(vertex_index)` and
 `fs_screen` returns a colour for `@builtin(position)`. `src/render/shaders/screen.wgsl`
@@ -203,7 +221,14 @@ var color = mix(backdrop, ink.rgb, ink.a);
 Effect shaders spread that line out — the aberration in the CRT config shifts the
 texture sideways per channel, so the alpha comes from the unshifted sample and the
 colour from the shifted ones. Anything that ignores the alpha shows the plain
-`background` colour behind the text whatever `background_image` says.
+`background` colour behind the text whatever `background_image` says. The overlay
+is the last thing the reference shader does, so a shader that draws one puts it
+after the cursor and after whatever else it did:
+
+```wgsl
+let glass = textureSample(foreground_tex, screen_sampler, uv);
+color = mix(color, glass.rgb, glass.a);
+```
 
 `fs_screen` is also where the cursor is drawn: the uniform says which cell it is
 in, what shape it has and whether it is shown at all. The reference shader draws

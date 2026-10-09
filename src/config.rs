@@ -35,6 +35,9 @@ pub(crate) struct Config {
     /// A picture to draw behind the grid. `None` draws the plain background
     /// colour, which is what the shader does when no picture is there at all.
     pub background_image: Option<PathBuf>,
+    /// A picture to draw over everything, transparent where the screen below
+    /// should show through. `None` is no overlay at all.
+    pub foreground_image: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -47,6 +50,7 @@ impl Default for Config {
             cursor_color: [0.16, 0.72, 0.72, 1.0],
             shader: None,
             background_image: None,
+            foreground_image: None,
         }
     }
 }
@@ -58,9 +62,9 @@ const DEFAULT_CONFIG: &str = r#"# hext configuration.
 # This file is Python: the host evaluates it with an embedded interpreter, so
 # anything that produces the right value works. Every name is optional, and one
 # that is missing or of the wrong type falls back to the default shown here.
-# `shader` and `background_image` are the settings the app reads back today; the
-# others are written out for the day they are wired up, so changing them has no
-# effect yet.
+# `shader`, `background_image` and `foreground_image` are the settings the app
+# reads back today; the others are written out for the day they are wired up, so
+# changing them has no effect yet.
 
 # Glyphs are rasterized at this size, in logical pixels.
 font_size = 16.0
@@ -96,6 +100,16 @@ shader = None
 # `None` shows the plain `background` colour instead, and a picture that cannot
 # be read is reported and the colour used.
 background_image = None
+
+# A picture to draw over everything, stretched the same way: the glass in front
+# of the tube. Where it is transparent the screen shows through, so a shadow
+# mask, a grille, a sheet of glare or a scratch is a PNG with an alpha channel:
+#
+#     foreground_image = "/home/you/pictures/mask.png"
+#
+# `None` is no overlay at all, and a picture that cannot be read is reported and
+# nothing is drawn over the screen.
+foreground_image = None
 
 # The app's entity-component world is bound here as `world`: the same object the
 # engine goes on using, so this file can seed it and set it up. It holds the
@@ -213,6 +227,7 @@ impl Config {
 
             config.shader = setting_text(&globals, "shader");
             config.background_image = setting_path(&globals, "background_image");
+            config.foreground_image = setting_path(&globals, "foreground_image");
 
             Ok(())
         })?;
@@ -552,6 +567,33 @@ mod tests {
         assert_eq!(
             config("bad-background", "background_image = 42\n").background_image,
             None
+        );
+    }
+
+    #[test]
+    fn the_foreground_image_setting_is_the_path_the_config_wrote() {
+        let overlay = config("foreground", "foreground_image = '/tmp/mask.png'\n");
+
+        assert_eq!(
+            overlay.foreground_image.as_deref(),
+            Some(std::path::Path::new("/tmp/mask.png"))
+        );
+    }
+
+    #[test]
+    fn a_config_without_a_foreground_image_has_none() {
+        assert_eq!(
+            config("no-foreground", "font_size = 30.0\n").foreground_image,
+            None
+        );
+        assert_eq!(
+            config("none-foreground", "foreground_image = None\n").foreground_image,
+            None
+        );
+        assert_eq!(
+            config("empty-foreground", "foreground_image = ''\n").foreground_image,
+            None,
+            "an empty name is no picture at all"
         );
     }
 }
