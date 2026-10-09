@@ -9,6 +9,7 @@
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use anyhow::anyhow;
 use winit::event::Event;
@@ -22,13 +23,43 @@ const SCREEN_SHADER: &str = include_str!("shaders/screen.wgsl");
 /// The WGSL the screen pipeline is built from: the source the config wrote, or
 /// the shader compiled into the binary when the config set none.
 ///
-/// The config is read at startup, so changing the shader is a restart rather than
-/// a rebuild.
+/// A source that is not WGSL the compiler accepts is reported and the built-in
+/// shader used instead, so a broken shader in the config file is a note rather
+/// than a terminal that will not start — the same bargain every other setting
+/// makes. It is checked here rather than left to wgpu because a validation
+/// failure there is fatal to the process.
 fn screen_shader(source: Option<&str>) -> Cow<'static, str> {
-    match source {
-        Some(source) => Cow::Owned(source.to_owned()),
-        None => Cow::Borrowed(SCREEN_SHADER),
+    let Some(source) = source else {
+        return Cow::Borrowed(SCREEN_SHADER);
+    };
+
+    if let Err(error) = validate_shader(source) {
+        eprintln!("{WINDOW_TITLE}: the shader in the config is not usable: {error:#}");
+
+        return Cow::Borrowed(SCREEN_SHADER);
     }
+
+    Cow::Owned(source.to_owned())
+}
+
+/// Runs the shader through the same WGSL front end wgpu uses, so that a source
+/// which cannot be built is found before the pipeline is asked for it.
+fn validate_shader(source: &str) -> anyhow::Result<()> {
+    let module = naga::front::wgsl::parse_str(source).map_err(|error| {
+        anyhow!(
+            "not valid WGSL: {}",
+            error.emit_to_string(source).trim_end()
+        )
+    })?;
+
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .map_err(|error| anyhow!("not a usable shader: {}", error.emit_to_string(source)))?;
+
+    Ok(())
 }
 
 // The shaped cursor the pipeline starts with, before a shell asks for another
@@ -61,28 +92,39 @@ struct ScreenUniforms {
     cursor_visible: u32,
     cursor_style: u32,
     cursor_size: [f32; 2],
-    padding: [u32; 2],
+    /// Seconds since the app started: the clock an animated shader reads to
+    /// move. A shader that ignores it draws the same frame every time, which is
+    /// what every shader did before it existed.
+    time: f32,
+    /// Keeps the struct a multiple of sixteen bytes, which is the alignment a
+    /// uniform buffer binding wants. The shader does not read it.
+    pad: u32,
 }
 
 impl ScreenUniforms {
-    fn new(background: [f32; 4], cursor_color: [f32; 4], resolution: [f32; 2]) -> Self {
+    /// The colours are not here: they belong to the terminal and are copied in
+    /// by [`follow`](Self::follow), so that a render function can animate them.
+    fn new(resolution: [f32; 2]) -> Self {
         Self {
-            background,
-            cursor_color,
+            background: [0.0; 4],
+            cursor_color: [0.0; 4],
             resolution,
             grid: [1, 1],
             cursor: [0, 0],
             cursor_visible: 1,
             cursor_style: CURSOR_BLOCK,
             cursor_size: [0.0, 0.0],
-            padding: [0; 2],
+            time: 0.0,
+            pad: 0,
         }
     }
 
-    /// Points the uniform at the terminal's current state: how big the grid is,
-    /// where the cursor sits in it, what shape it has and whether it is drawn
-    /// at all.
+    /// Points the uniform at the terminal's current state: the colours the
+    /// frame composites with, how big the grid is, where the cursor sits in it,
+    /// what shape it has and whether it is drawn at all.
     fn follow(&mut self, terminal: &Terminal) {
+        self.background = terminal.background;
+        self.cursor_color = terminal.cursor_color;
         self.cursor = [
             terminal.cursor_position.0 as u32,
             terminal.cursor_position.1 as u32,
@@ -105,10 +147,24 @@ pub(crate) struct Drawable {
     sampler: wgpu::Sampler,
     buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// The instant `screen.time` is counted from. The app makes one when it
+    /// starts and keeps it across a config reload, so the clock a shader reads
+    /// does not restart when the file is saved.
+    start: Instant,
     /// The picture the grid is drawn over. It is held here because the bind
     /// group only has a view of it, and the bind group is rebuilt whenever the
     /// terminal's own texture is replaced.
     background_view: wgpu::TextureView,
+    /// That same texture, held as well as its view: when the config named no
+    /// picture it is one pixel of the background colour, and a render function
+    /// that animates the colour rewrites that pixel.
+    background_texture: wgpu::Texture,
+    /// Whether `background_texture` is the config's picture rather than the
+    /// one-pixel backdrop. A picture is never rewritten.
+    background_is_picture: bool,
+    /// The pixel `background_texture` holds now, so a frame that did not change
+    /// the colour does not upload it again.
+    backdrop: [u8; 4],
     /// The picture drawn over everything, held for the same reason.
     foreground_view: wgpu::TextureView,
     screen: ScreenUniforms,
@@ -117,17 +173,18 @@ pub(crate) struct Drawable {
 impl Drawable {
     /// Builds the screen pipeline that every frame is drawn with.
     ///
-    /// `background` and `cursor_color` come from the config file, as `r, g, b, a`,
-    /// `shader` is the WGSL source the config wrote, when it wrote one, and
-    /// `pictures` are the ones it named, when it named any.
+    /// `shader` is the WGSL source the config wrote, when it wrote one —
+    /// checked here, and replaced by the built-in one with a note if it is not
+    /// WGSL the compiler accepts — and `pictures` are the ones it named, when
+    /// it named any. `start` is the clock the shader's `time` counts from: the
+    /// app's own, so that a reload does not restart it.
     pub(crate) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
-        background: [f32; 4],
-        cursor_color: [f32; 4],
         shader: Option<&str>,
         pictures: Pictures<'_>,
+        start: Instant,
     ) -> Self {
         let screen_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(WINDOW_TITLE),
@@ -246,11 +303,9 @@ impl Drawable {
             ..Default::default()
         });
 
-        let screen = ScreenUniforms::new(
-            background,
-            cursor_color,
-            [0.0, 0.0], // resolved once the frame knows how big the surface is
-        );
+        // The resolution is set once the frame knows how big the surface is,
+        // and the colours arrive from the terminal on the first `sync`.
+        let screen = ScreenUniforms::new([0.0, 0.0]);
 
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(WINDOW_TITLE),
@@ -260,14 +315,18 @@ impl Drawable {
         });
         queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&screen));
 
-        let background_view = picture_texture(
+        let (background_texture, background_is_picture) = picture_texture(
             device,
             queue,
-            background_pixel(background),
+            // Only ever seen for the one frame before the first `sync` puts
+            // the terminal's own background colour in its place.
+            [0, 0, 0, 255],
             pictures.background,
-        )
-        .create_view(&wgpu::TextureViewDescriptor::default());
+        );
+        let background_view =
+            background_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let foreground_view = picture_texture(device, queue, NO_OVERLAY, pictures.foreground)
+            .0
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group = create_screen_bind_group(
@@ -286,7 +345,11 @@ impl Drawable {
             sampler,
             buffer,
             bind_group,
+            start,
             background_view,
+            background_texture,
+            background_is_picture,
+            backdrop: [0, 0, 0, 255],
             foreground_view,
             screen,
         }
@@ -317,9 +380,35 @@ impl Drawable {
     }
 
     /// Writes the uniform the shader reads, from the state the terminal is in.
+    ///
+    /// The clock is stamped here, on the frame's own thread, so the shader's
+    /// `time` is the moment this frame is drawn rather than the moment the
+    /// uniform was last built.
     pub(crate) fn sync(&mut self, queue: &wgpu::Queue, terminal: &Terminal) {
         self.screen.follow(terminal);
+        self.screen.time = self.start.elapsed().as_secs_f32();
+        self.follow_background(queue);
         queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&self.screen));
+    }
+
+    /// Keeps the one-pixel backdrop in step with the background colour.
+    ///
+    /// The colour is the terminal's, and a render function can animate it, so
+    /// the pixel the shader mixes the grid over follows it. A picture the
+    /// config named is left alone.
+    fn follow_background(&mut self, queue: &wgpu::Queue) {
+        if self.background_is_picture {
+            return;
+        }
+
+        let pixel = background_pixel(self.screen.background);
+
+        if pixel == self.backdrop {
+            return;
+        }
+
+        self.backdrop = pixel;
+        write_pixel(queue, &self.background_texture, pixel);
     }
 
     /// Finishes the frame: the render systems a config file registered run
@@ -410,23 +499,30 @@ fn create_screen_bind_group(
 
 /// One of the two pictures a frame is composited with: the file the config
 /// named, or `fallback` — a single pixel — so that the shader always has a
-/// texture to sample. A picture that cannot be read is reported and the
-/// fallback used instead, the way a config that cannot be evaluated keeps the
-/// defaults.
+/// texture to sample. The flag says which of the two the texture came out as,
+/// which is what tells a backdrop that can follow the background colour from
+/// one that is a picture and must be left alone.
+///
+/// A picture that cannot be read is reported and the fallback used instead, the
+/// way a config that cannot be evaluated keeps the defaults.
 fn picture_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     fallback: [u8; 4],
     image: Option<&Path>,
-) -> wgpu::Texture {
-    let (width, height, pixels) = match image.map(load_picture) {
-        Some(Ok(picture)) => picture,
+) -> (wgpu::Texture, bool) {
+    let (width, height, pixels, is_picture) = match image.map(load_picture) {
+        Some(Ok(picture)) => {
+            let (width, height, pixels) = picture;
+
+            (width, height, pixels, true)
+        }
         Some(Err(error)) => {
             eprintln!("{WINDOW_TITLE}: {error:#}");
 
-            (1, 1, fallback.to_vec())
+            (1, 1, fallback.to_vec(), false)
         }
-        None => (1, 1, fallback.to_vec()),
+        None => (1, 1, fallback.to_vec(), false),
     };
 
     let size = wgpu::Extent3d {
@@ -462,7 +558,34 @@ fn picture_texture(
         size,
     );
 
-    texture
+    (texture, is_picture)
+}
+
+/// Rewrites the single pixel of a one-pixel texture.
+///
+/// The backdrop is such a texture whenever the config named no picture, so
+/// animating the background colour is a four-byte upload on the frames where
+/// the colour really changed — no new texture, and no bind group to rebuild.
+fn write_pixel(queue: &wgpu::Queue, texture: &wgpu::Texture, pixel: [u8; 4]) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &pixel,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 /// One pixel of the background colour, opaque: what the backdrop is when the
@@ -486,7 +609,7 @@ fn load_picture(path: &Path) -> anyhow::Result<(u32, u32, Vec<u8>)> {
 mod tests {
     use super::{
         CURSOR_BLOCK, NO_OVERLAY, SCREEN_SHADER, ScreenUniforms, background_pixel, load_picture,
-        screen_shader,
+        screen_shader, validate_shader,
     };
     use crate::terminal::Terminal;
     use crate::terminal::font::Font;
@@ -499,23 +622,50 @@ mod tests {
     }
 
     #[test]
+    fn the_built_in_shader_is_wgsl_the_compiler_accepts() {
+        validate_shader(SCREEN_SHADER).expect("the shader the binary ships with");
+    }
+
+    #[test]
     fn the_configs_own_shader_is_used_instead() {
-        let source = "// the WGSL the config wrote\n";
+        let source = "@vertex fn vs_screen() -> @builtin(position) vec4<f32> {\n    return vec4<f32>(0.0);\n}\n";
 
         assert_eq!(&*screen_shader(Some(source)), source);
     }
 
     #[test]
+    fn a_shader_that_is_not_wgsl_keeps_the_built_in_one() {
+        // A broken shader is a note and the built-in shader, not a terminal
+        // that refuses to start.
+        assert_eq!(&*screen_shader(Some("this is not WGSL")), SCREEN_SHADER);
+    }
+
+    #[test]
+    fn the_uniform_is_a_whole_number_of_sixteen_byte_rows() {
+        // The layout `src/render/shaders/screen.wgsl` declares: two vec4s, four
+        // vec2s and four scalars, padded out to the alignment a uniform buffer
+        // binding wants.
+        assert_eq!(std::mem::size_of::<ScreenUniforms>(), 80);
+        assert_eq!(std::mem::size_of::<ScreenUniforms>() % 16, 0);
+    }
+
+    #[test]
     fn the_uniform_follows_the_terminal() {
         let font = Font::load(16.0).expect("a system monospace font");
-        let mut terminal = Terminal::new(Arc::new(RwLock::new(font)), [0.05, 0.06, 0.08, 1.0]);
-        let mut screen = ScreenUniforms::new([0.0; 4], [1.0; 4], [64.0, 32.0]);
+        let mut terminal = Terminal::new(
+            Arc::new(RwLock::new(font)),
+            [0.05, 0.06, 0.08, 1.0],
+            [0.16, 0.72, 0.72, 1.0],
+        );
+        let mut screen = ScreenUniforms::new([64.0, 32.0]);
 
         screen.follow(&terminal);
 
         assert_eq!(screen.cursor, [0, 0]);
         assert_eq!(screen.cursor_style, CURSOR_BLOCK);
         assert_eq!(screen.cursor_visible, 1);
+        assert_eq!(screen.background, [0.05, 0.06, 0.08, 1.0]);
+        assert_eq!(screen.cursor_color, [0.16, 0.72, 0.72, 1.0]);
         assert_eq!(
             screen.cursor_size,
             [terminal.cursor_size.0, terminal.cursor_size.1]
@@ -529,6 +679,15 @@ mod tests {
         assert_eq!(screen.cursor, [2, 0]);
         assert_eq!(screen.cursor_visible, 0);
         assert_eq!(screen.cursor_style, 1, "the bar `DECSCUSR` asked for");
+
+        // A render function that recolours the terminal shows up here, which is
+        // the frame after it ran.
+        terminal.set_background([1.0, 0.0, 0.0, 1.0]);
+        terminal.set_cursor_color([0.0, 1.0, 0.0, 1.0]);
+        screen.follow(&terminal);
+
+        assert_eq!(screen.background, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(screen.cursor_color, [0.0, 1.0, 0.0, 1.0]);
     }
 
     #[test]

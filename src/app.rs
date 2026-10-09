@@ -14,7 +14,7 @@ use winit::{
 
 use crate::WINDOW_TITLE;
 use crate::clipboard::Clipboard;
-use crate::config::Config;
+use crate::config::{Config, Reload};
 use crate::pty::Pty;
 use crate::render::{Gpu, Pictures};
 use crate::terminal::font::Font;
@@ -40,6 +40,9 @@ pub(crate) enum UserEvent {
 pub(crate) struct App {
     world: Arc<RwLock<World<UserEvent>>>,
     entity: Id,
+    /// The config file, watched so that an edit is picked up while the terminal
+    /// runs rather than at the next start.
+    reload: Reload,
 }
 
 impl App {
@@ -68,7 +71,11 @@ impl App {
         // loaded outside the `read` guard on purpose: the config is handed the
         // world, and a `config.py` that touched it would deadlock against a
         // guard held here.
+        let before = world.read().unwrap().sm.read().unwrap().pipeline_counts();
         let config = Config::load(Arc::clone(&world));
+        // What the file added to the world's pipelines, so that a reload can
+        // take it back before running the file again.
+        let reload = Reload::new(Config::path().ok(), &before, &world);
 
         world.read().unwrap().attach_value(entity, config);
 
@@ -79,7 +86,11 @@ impl App {
             .unwrap()
             .add_system(0, TerminalSystem::new(entity, proxy));
 
-        Ok(Self { world, entity })
+        Ok(Self {
+            world,
+            entity,
+            reload,
+        })
     }
 
     /// Runs one event through the world's systems, stopping the loop if a
@@ -113,6 +124,40 @@ impl App {
         self.component::<Config>()
             .map(|config| config.read().unwrap().clone())
             .unwrap_or_default()
+    }
+
+    /// Re-reads the config file when it changed on disk, and puts what it says
+    /// into the running app: the terminal's colours, and the renderer's pipeline,
+    /// which is rebuilt from the shader and the pictures.
+    fn reload_config(&mut self) {
+        let Some(config) = self.reload.reload(Arc::clone(&self.world)) else {
+            return;
+        };
+
+        if let Some(path) = self.reload.path() {
+            eprintln!("{WINDOW_TITLE}: reloaded {}", path.display());
+        }
+
+        if let Some(terminal) = self.component::<Terminal>() {
+            let mut terminal = terminal.write().unwrap();
+
+            terminal.set_background(config.background);
+            terminal.set_cursor_color(config.cursor_color);
+        }
+
+        if let Some(gpu) = self.component::<Gpu>() {
+            let mut gpu = gpu.write().unwrap();
+
+            gpu.apply(&config);
+            // What the file changed is on screen at the next frame, whether or
+            // not the config animates.
+            gpu.request_redraw();
+        }
+
+        self.world
+            .read()
+            .unwrap()
+            .attach_value(self.entity, config);
     }
 }
 
@@ -246,10 +291,10 @@ impl TerminalSystem {
             (gpu, terminal, world.systems())
         };
 
-        if let Err(error) =
-            gpu.write()
-                .unwrap()
-                .render(&mut terminal.write().unwrap(), Arc::clone(&world), systems)
+        if let Err(error) = gpu
+            .write()
+            .unwrap()
+            .render(&terminal, Arc::clone(&world), systems)
         {
             eprintln!("{WINDOW_TITLE}: {error:#}");
         }
@@ -273,6 +318,12 @@ impl TerminalSystem {
             WindowEvent::Focused(focused) => {
                 if let Some(terminal) = self.terminal(world) {
                     terminal.write().unwrap().set_focused(*focused);
+                }
+
+                // An animated shader pauses with the blink clock, so the
+                // renderer is told as well.
+                if let Some(gpu) = self.gpu(world) {
+                    gpu.write().unwrap().set_focused(*focused);
                 }
 
                 self.request_redraw(world);
@@ -372,7 +423,10 @@ impl System<UserEvent> for TerminalSystem {
             .unwrap_or_default();
 
         let font = world.attach_value(self.entity, Font::load(config.font_size)?);
-        world.attach_value(self.entity, Terminal::new(font, config.background));
+        world.attach_value(
+            self.entity,
+            Terminal::new(font, config.background, config.cursor_color),
+        );
 
         // Reads from the pty block, so they happen on the reader thread and the
         // result is handed to the event loop as a user event.
@@ -478,13 +532,12 @@ impl ApplicationHandler<UserEvent> for App {
 
         let gpu = match pollster::block_on(Gpu::new(
             window,
-            config.background,
-            config.cursor_color,
             config.shader.as_deref(),
             Pictures {
                 background: config.background_image.as_deref(),
                 foreground: config.foreground_image.as_deref(),
             },
+            config.animate,
         )) {
             Ok(gpu) => gpu,
             Err(error) => {
@@ -516,11 +569,27 @@ impl ApplicationHandler<UserEvent> for App {
         // this is the one event the app makes up itself.
         self.dispatch(event_loop, Event::UserEvent(UserEvent::Blink));
 
+        // A file that changed is re-read here, on the turn where the loop is
+        // about to sleep or draw: the config is not something that has to be
+        // noticed within a frame.
+        self.reload_config();
+
         // Then sleep until the clock's next flip, so a quiet shell costs
         // nothing at all. `Wait` is enough once nothing on screen blinks.
         let deadline = self
             .component::<Terminal>()
             .and_then(|terminal| terminal.read().unwrap().next_blink());
+        // An animated shader wants a frame every frame. Asking for the next one
+        // here keeps the loop awake without spinning: presenting a frame still
+        // paces them to the display, and nothing is asked for while the window
+        // is in the background.
+        if let Some(gpu) = self.component::<Gpu>() {
+            let gpu = gpu.read().unwrap();
+
+            if gpu.animating() {
+                gpu.request_redraw();
+            }
+        }
 
         event_loop.set_control_flow(match deadline {
             Some(deadline) => ControlFlow::WaitUntil(deadline),

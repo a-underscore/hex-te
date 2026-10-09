@@ -27,6 +27,13 @@ pub(crate) struct Terminal {
     pub cursor_visible: bool,
     /// The cursor's shape, in the shader's `cursor_style` constants.
     pub cursor_style: u32,
+    /// The colour behind the grid, as the config set it and a render function
+    /// may change it: the window is cleared to it, and a cell that asked for no
+    /// background of its own is painted with it.
+    pub background: [f32; 4],
+    /// The colour the cursor is drawn in. The cursor is the shader's to draw, so
+    /// this is what the uniform carries to it every frame.
+    pub cursor_color: [f32; 4],
     pub size: (usize, usize),
     pub last_texture_size: wgpu::Extent3d,
     pub texture: Option<wgpu::Texture>,
@@ -50,8 +57,8 @@ impl Terminal {
     ///
     /// `background` is the configured window colour: it becomes what
     /// [`Color::Default`] resolves to behind a cell, so the window and the text
-    /// agree.
-    pub(crate) fn new(font: Arc<RwLock<Font>>, background: [f32; 4]) -> Self {
+    /// agree. `cursor_color` is the colour the shader draws the cursor in.
+    pub(crate) fn new(font: Arc<RwLock<Font>>, background: [f32; 4], cursor_color: [f32; 4]) -> Self {
         let cursor_size = font.read().unwrap().cell();
 
         let mut terminal = Self {
@@ -59,6 +66,8 @@ impl Terminal {
             cursor_size,
             cursor_visible: true,
             cursor_style: CursorStyle::default().shape(),
+            background,
+            cursor_color,
             size: (0, 0),
             last_texture_size: wgpu::Extent3d {
                 width: 0,
@@ -191,6 +200,22 @@ impl Terminal {
         if focused {
             self.blink.wake();
         }
+    }
+
+    /// The colour behind the grid. Changing it also repaints the cells that take
+    /// their background from the window, so the two never drift apart.
+    pub(crate) fn set_background(&mut self, color: [f32; 4]) {
+        self.background = color;
+        self.palette.set_background(color);
+    }
+
+    /// The colour the cursor is drawn in.
+    ///
+    /// The cursor is drawn by the shader, so this only has to be remembered:
+    /// the uniform carries it to the shader on the next frame. Changing it from
+    /// a render function is therefore a frame late, which nothing can see.
+    pub(crate) fn set_cursor_color(&mut self, color: [f32; 4]) {
+        self.cursor_color = color;
     }
 
     /// What the shell has asked of the keyboard, for [`encode_key`].
@@ -808,6 +833,13 @@ impl Palette {
             foreground: [0xdc, 0xdf, 0xe4],
             background: srgb(background),
         }
+    }
+
+    /// The window colour the cells with no background of their own are painted
+    /// with. A render function changing the terminal's background lands here, so
+    /// the cells the rasterizer fills in follow it.
+    fn set_background(&mut self, background: [f32; 4]) {
+        self.background = srgb(background);
     }
 
     /// What to paint a cell with, once the palette and the attributes that
@@ -2186,7 +2218,11 @@ mod tests {
     fn terminal() -> Terminal {
         let font = Font::load(16.0).expect("a system monospace font");
 
-        Terminal::new(Arc::new(RwLock::new(font)), [0.05, 0.06, 0.08, 1.0])
+        Terminal::new(
+            Arc::new(RwLock::new(font)),
+            [0.05, 0.06, 0.08, 1.0],
+            [0.16, 0.72, 0.72, 1.0],
+        )
     }
 
     /// Feeds `bytes` through a real VT parser into a fresh `cols` x `rows` grid.

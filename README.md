@@ -6,12 +6,13 @@ The grid is drawn on the CPU into a texture and composited on the GPU, and the
 look is a Python file: colours, the shader the screen is drawn with, and the two
 pictures that can go behind and in front of it.
 
-hext is moddable. The configuration file is Python, evaluated at startup by an
-embedded interpreter, so the look and the behaviour are both something a user
-edits rather than something baked into the binary: the colours and the shader,
-the pictures behind and in front of the grid, systems that shape the running app
-on every event, and render functions that run once per frame with the frame about
-to be drawn. Nothing above the shell needs a rebuild to change — see
+hext is moddable. The configuration file is Python, evaluated by an embedded
+interpreter and re-read whenever it changes, so the look and the behaviour are
+both something a user edits rather than something baked into the binary: the
+colours and the shader, the pictures behind and in front of the grid, systems that
+shape the running app on every event, and render functions that run once per frame
+with the frame about to be drawn — the terminal itself included, so a config can
+animate it. Nothing above the shell needs a rebuild *or a restart* to change — see
 [Configuration](#configuration).
 
 ```sh
@@ -114,7 +115,16 @@ The colour swatch again, from a later capture:
   pipeline, so the systems a config file registered can shape the frame that is
   about to be drawn.
 - Lets the config file add systems of its own, so Python can shape the running
-  app rather than only fill in settings.
+  app rather than only fill in settings, and re-reads the file when it changes, so
+  the colours, the shader, the pictures and what Python does are all an edit and a
+  save rather than a restart.
+- Can draw a frame every frame when the config asks for it (`animate = True`),
+  which is what a shader with a clock in it needs — the uniform it reads ends with
+  `time`, seconds since the app started — and pauses that when the window is in
+  the background, so a buried terminal costs nothing.
+- Hands a render function the terminal itself (`world.terminal()`), so a config
+  can read where the cursor is and how big the grid is, and animate the window and
+  cursor colours from Python as well as from a shader.
 - Draws the screen as ink over a backdrop: the screen texture carries how much of
   each pixel the grid covers in its alpha, so a picture named by
   `background_image` shows through every cell a program left unpainted, and a
@@ -137,6 +147,11 @@ On first run the app writes a `config.py` into the config directory —
 out; a file that cannot be evaluated is reported instead of stopping the
 terminal.
 
+The file is watched while the app runs: save it and the change lands on the
+running terminal, with no restart and no rebuild. A setting of the wrong type, a
+picture that cannot be read, or a shader that does not compile is reported and
+that one setting keeps its default.
+
 These are the names the file documents:
 
 | Setting | Meaning |
@@ -146,15 +161,19 @@ These are the names the file documents:
 | `shell` | Program to run inside the pty; `None` means `$SHELL` |
 | `background`, `cursor_color` | Colours, as `(r, g, b)` floats in `0.0..=1.0` |
 | `shader` | The WGSL the screen is drawn with, as source; `None` keeps the built-in one |
+| `animate` | Draw a frame every frame, so a shader with a clock in it moves; `False` draws only on change |
 | `background_image` | A PNG or JPEG to draw behind the grid; `None` keeps the `background` colour |
 | `foreground_image` | A PNG or JPEG to draw over everything; `None` is no overlay |
 
-`shader`, `background_image` and `foreground_image` are the settings that are
-applied today: the app builds the screen pipeline from that source and loads
-those two pictures, so all three are part of `config.py` and changing them is a
-restart rather than a rebuild. The rest of the names above are documented but not
-read back yet. The file is read once, when the app starts, so restart it to pick
-up an edit; a window manager is free to override the requested window size.
+Every one of them is read back: the colours and the two pictures are part of the
+frame, the shader is the pipeline the frame is drawn with, `animate` decides
+whether the loop keeps drawing, and the file is re-read when it is saved, so none
+of it needs a rebuild. A window manager is free to override the requested window
+size.
+
+`docs/config-aurora.py` is the worked example: an animated shader, and a render
+function that drifts the cursor colour from Python. Copy it over your own
+`config.py` and save it to see both.
 
 ### A picture behind the grid
 
@@ -205,7 +224,7 @@ app does not know which ones it will find:
 
 | Binding | What it is |
 | --- | --- |
-| `@group(0) @binding(0)` | A `Screen` uniform: `background`, `cursor_color`, `resolution`, `grid`, `cursor`, `cursor_visible`, `cursor_style`, `cursor_size` |
+| `@group(0) @binding(0)` | A `Screen` uniform: `background`, `cursor_color`, `resolution`, `grid`, `cursor`, `cursor_visible`, `cursor_style`, `cursor_size`, and `time` — seconds since the app started, for a shader that moves |
 | `@group(0) @binding(1)` | The screen texture: the grid as ink, in sRGB bytes, with the alpha saying how much of each pixel a cell covers |
 | `@group(0) @binding(2)` | A sampler for that texture |
 | `@group(0) @binding(3)` | The `background_image` picture, stretched over the window — or one pixel of `background` when the config named none |
@@ -250,8 +269,63 @@ a pixel or more is worth measuring against the built-in shader before keeping it
 a cell is only about ten by eighteen pixels, so a small amount of blur or colour
 separation is the difference between tinted text and broken text.
 
-Source that is present but not valid WGSL is a wgpu error; the built-in shader is
-parsed and validated by `cargo test`.
+Source that is present but not valid WGSL is reported and the built-in shader
+used instead, so a typo in the config is a note rather than a terminal that will
+not start — at startup, and again on every reload. It is checked with the same
+WGSL front end (`naga`) that wgpu compiles shaders with, before wgpu is asked for
+the pipeline, because a validation failure there is fatal to the process. The
+built-in shader is parsed and validated by `cargo test`.
+
+### Animating
+
+A shader that moves needs a clock and a reason to be drawn again. The clock is
+`time` in the `Screen` uniform — seconds since the app started — and the reason is
+`animate`:
+
+```python
+animate = True
+```
+
+With `animate = False` — the default — the app draws only when something changed:
+a keystroke, output from the shell, the blink clock. A quiet terminal costs
+nothing, which is what makes it a terminal rather than a demo. With `animate =
+True` the app asks for a frame as soon as the loop goes idle, so the shader sees
+the time advance; presenting still paces the frames to the display, so it draws at
+the refresh rate and not faster. Nothing is drawn while the window is in the
+background, so an animation pauses there rather than running unseen.
+
+`animate` is a setting the file can change while the app runs, so the clock only
+has to tick when the shader that reads it is loaded:
+
+```wgsl
+fn sky(uv: vec2<f32>, time: f32) -> vec3<f32> {
+    return 0.5 + 0.5 * sin(uv.x * 6.0 + time);
+}
+```
+
+`docs/config-aurora.py` is a whole shader built on this: a night sky with bands
+of light drifting across it, then the grid, then a vignette, scanlines and grain.
+
+### Reloading
+
+The file is read again whenever it changes on disk — checked a few times a second,
+ot once per frame — and what it says is put into the running terminal:
+
+```
+hext: reloaded /home/you/.config/hext/config.py
+```
+
+The terminal's colours, the shader, the two pictures, the window size and
+`animate` all follow the new file. A reload is also the one case that has to be
+careful with code: the file is Python, so it can register systems, and a system
+registered by the previous file would stack on top of the new one's. The systems
+the config added are therefore taken back before it is evaluated again, so a
+reloaded file replaces the last one's behaviour rather than adding to it. What it
+did to the world — entities it spawned, values it set — stays: a reload is not a
+rewind.
+
+A file that cannot be evaluated is reported and the settings are left as they
+were, so an edit in progress never takes the terminal down with it.
 
 ### The world
 
@@ -267,6 +341,7 @@ running app rather than only fill in settings:
 | `world.add_system(fn, pipeline=render_pipeline)` | Registers a render function: called once per frame, while it is drawn |
 | `world.remove_system(pipeline=0)` | Drops the most recently added system |
 | `world.system_count()` | How many systems are registered |
+| `world.terminal()` | The running terminal, or `None` before the app has built it |
 | `world.ambient_color`, `world.ambient_intensity` | The global lighting base values |
 
 It is the same object the app runs on, not a copy, so anything it changes is
@@ -304,10 +379,48 @@ world.add_system(draw, pipeline=render_pipeline)
 
 A frame is not an event, so the render systems are handed `Event::AboutToWait` —
 the event that says the loop has nothing left to do — which is exactly when a
-frame is drawn. The frame is drawn with the world's lock free, so a render
-function may read and write the world the way any other system does; what it can
-reach today is the world itself (the entities and the ambient values), because
-the components the terminal draws with are not exposed to Python yet.
+frame is drawn. The frame is drawn with the world's lock free, and the terminal's
+lock is not held across the render systems either, so a render function may read
+and write the world the way any other system does.
+
+### The terminal, from Python
+
+A render function is also handed the terminal the frame is about to be drawn
+from, through `world.terminal()`. That is a handle to the running terminal, not a
+copy:
+
+| Member | Meaning |
+| --- | --- |
+| `terminal.cursor` | Where the cursor is, `(column, row)` |
+| `terminal.size` | The grid, `(columns, rows)` |
+| `terminal.cursor_visible` | Whether the cursor is drawn at all |
+| `terminal.cursor_style` | `0` block, `1` bar, `2` underline — what the shell asked for |
+| `terminal.cursor_size` | One cell, `(width, height)` in physical pixels |
+| `terminal.background` | The colour behind the grid, as `(r, g, b)` |
+| `terminal.cursor_color` | The colour the cursor is drawn in, as `(r, g, b)` |
+
+The cursor's own state belongs to the shell — it is what `DECTCEM` and `DECSCUSR`
+set — so it is read-only. The two colours are the terminal's, and a frame reads
+them from it, so writing them from a render function animates them:
+
+```python
+import math, time
+
+started = time.monotonic()
+
+def drift(world):
+    terminal = world.terminal()
+    if terminal is None:
+        return
+    terminal.cursor_color = (0.1, 0.9, 0.5 + 0.5 * math.sin(time.monotonic() - started))
+
+world.add_system(drift, pipeline=render_pipeline)
+```
+
+A change made there lands on the next frame, because a frame's uniform is written
+before its render functions run — one frame, which is not a difference an eye can
+see. Animating this way needs `animate = True` as well, for the same reason a
+shader clock does: without it there is no next frame to land on.
 
 ## Structure
 
@@ -315,7 +428,7 @@ the components the terminal draws with are not exposed to Python yet.
 | --- | --- |
 | `src/main.rs` | Creates the event loop, its user-event channel, and the application |
 | `src/app.rs` | The winit glue: turns events into `Control` values and runs them through the systems |
-| `src/config.rs` | Writes and evaluates the Python `config.py` through `pyo3` |
+| `src/config.rs` | Writes and evaluates the Python `config.py` through `pyo3`, and watches it so an edit is picked up while the app runs |
 | `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
 | `src/clipboard.rs` | The system clipboard a selection is copied to, held for the life of the app |
 | `src/terminal/` | The grid and everything that fills it |

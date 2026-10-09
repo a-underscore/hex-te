@@ -72,6 +72,18 @@ impl<E: 'static> SystemManager<E> {
         self.pipelines.values().map(Vec::len).sum()
     }
 
+    /// How many systems each pipeline holds, by id.
+    ///
+    /// A caller that runs a config file — which is free to register systems of
+    /// its own — takes one of these before and after, so it can tell what the
+    /// file added and take it back when it is next read.
+    pub fn pipeline_counts(&self) -> HashMap<Id, usize> {
+        self.pipelines
+            .iter()
+            .map(|(pid, pipeline)| (*pid, pipeline.len()))
+            .collect()
+    }
+
     /// Runs every system's `init`, in snapshot order.
     pub fn init(&self, world: Arc<RwLock<World<E>>>) -> anyhow::Result<()> {
         for system in self.snapshot() {
@@ -283,5 +295,22 @@ mod tests {
         systems.update(control(), world()).unwrap();
 
         assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pipeline_counts_say_what_each_pipeline_holds() {
+        // What a config loader takes before and after evaluating a file, so it
+        // can tell the systems the file added from the app's own.
+        let mut systems = SystemManager::new();
+        systems.add(0, Recorder::default());
+        systems.add(0, Recorder::default());
+        systems.add(2, Recorder::default());
+
+        let counts = systems.pipeline_counts();
+
+        assert_eq!(counts.get(&0), Some(&2));
+        assert_eq!(counts.get(&2), Some(&1));
+        assert_eq!(counts.get(&1), None, "a pipeline nothing was added to");
+        assert_eq!(counts.values().sum::<usize>(), systems.system_count());
     }
 }

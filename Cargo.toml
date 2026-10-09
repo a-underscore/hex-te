@@ -31,14 +31,19 @@ vte = "0.15.0"
 nalgebra = "0.32.5"
 pyo3 = { version = "0.29.3", features = ["auto-initialize"] }
 
+# The WGSL front end wgpu itself compiles shaders with, used directly because
+# `config.py` may name a shader: a source that would not build is found here,
+# reported, and replaced by the built-in one instead of taking the process down
+# — at startup, and again whenever the file is reloaded.
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+
 # The clipboard a selection is copied to: text only, so the image support and
 # the Wayland backend its default features pull in are left out.
 arboard = { version = "3.6.1", default-features = false }
 
 [dev-dependencies]
-# The same WGSL front end wgpu uses, so the shader can be validated in tests on
-# machines with no graphics driver.
-naga = { version = "30.0.1", features = ["wgsl-in"] }
+# The shader tests validate WGSL on machines with no graphics driver. `naga` is
+# a real dependency too, because the app checks a config's shader with it.
 
 # Best-effort release profile: a terminal is a latency-sensitive interactive
 # program, and thin LTO keeps the binary small without a long link step.

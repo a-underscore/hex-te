@@ -11,7 +11,11 @@ struct Screen {
     cursor_visible: u32,
     cursor_style: u32,
     cursor_size: vec2<f32>,
-    padding: vec2<u32>,
+    // Seconds since the app started, for a shader that animates. The built-in
+    // shader below is still, so it does not read it; a config that wants motion
+    // does. `pad` only exists to keep the struct 16-byte aligned.
+    time: f32,
+    pad: u32,
 }
 
 @group(0) @binding(0) var<uniform> screen: Screen;
