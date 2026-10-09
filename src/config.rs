@@ -119,6 +119,11 @@ animate = False
 #
 #     background_image = "/home/you/pictures/terminal.png"
 #
+# The picture's own alpha is part of the composite: it is drawn over the
+# `background` colour rather than in place of it, so a PNG with transparent
+# parts shows that colour through them. An opaque picture simply covers it,
+# which is what a wallpaper does.
+#
 # `None` shows the plain `background` colour instead, and a picture that cannot
 # be read is reported and the colour used.
 background_image = None
@@ -128,6 +133,11 @@ background_image = None
 # mask, a grille, a sheet of glare or a scratch is a PNG with an alpha channel:
 #
 #     foreground_image = "/home/you/pictures/mask.png"
+#
+# An overlay has to be transparent somewhere to be one, and the file has to say
+# so: a picture with no alpha channel — a three-channel PNG, or any JPEG — turns
+# up opaque everywhere, and covers the screen instead of lying over it. hext
+# says so when it loads one.
 #
 # `None` is no overlay at all, and a picture that cannot be read is reported and
 # nothing is drawn over the screen.

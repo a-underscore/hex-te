@@ -315,18 +315,36 @@ impl Drawable {
         });
         queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&screen));
 
-        let (background_texture, background_is_picture) = picture_texture(
+        // The two pictures, read before their textures. A picture that cannot be
+        // read is reported and the single pixel that stands in for it used
+        // instead, the way a config that cannot be evaluated keeps its defaults.
+        let background = read_picture(pictures.background);
+        let overlay = read_picture(pictures.foreground);
+
+        // An overlay is meant to be see-through somewhere, so a picture with no
+        // alpha channel covers the whole window rather than laying over it. The
+        // decoder cannot tell the difference — it adds an opaque alpha to
+        // anything that lacks one — so it is worth saying when a file has.
+        if let Some(overlay) = &overlay
+            && !overlay.has_alpha
+        {
+            eprintln!(
+                "{WINDOW_TITLE}: the overlay picture has no alpha channel, so it covers the screen"
+            );
+        }
+
+        let background_texture = picture_texture(
             device,
             queue,
             // Only ever seen for the one frame before the first `sync` puts
             // the terminal's own background colour in its place.
             [0, 0, 0, 255],
-            pictures.background,
+            background.as_ref(),
         );
+        let background_is_picture = background.is_some();
         let background_view =
             background_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let foreground_view = picture_texture(device, queue, NO_OVERLAY, pictures.foreground)
-            .0
+        let foreground_view = picture_texture(device, queue, NO_OVERLAY, overlay.as_ref())
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group = create_screen_bind_group(
@@ -497,32 +515,19 @@ fn create_screen_bind_group(
     })
 }
 
-/// One of the two pictures a frame is composited with: the file the config
-/// named, or `fallback` — a single pixel — so that the shader always has a
-/// texture to sample. The flag says which of the two the texture came out as,
-/// which is what tells a backdrop that can follow the background colour from
-/// one that is a picture and must be left alone.
-///
-/// A picture that cannot be read is reported and the fallback used instead, the
-/// way a config that cannot be evaluated keeps the defaults.
+/// One of the two pictures a frame is composited with, or `fallback` — a single
+/// pixel — when the config named none, so that the shader always has a texture
+/// to sample. A picture that could not be read is already a `None` by the time
+/// this is called, so the fallback is what stands in for it.
 fn picture_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     fallback: [u8; 4],
-    image: Option<&Path>,
-) -> (wgpu::Texture, bool) {
-    let (width, height, pixels, is_picture) = match image.map(load_picture) {
-        Some(Ok(picture)) => {
-            let (width, height, pixels) = picture;
-
-            (width, height, pixels, true)
-        }
-        Some(Err(error)) => {
-            eprintln!("{WINDOW_TITLE}: {error:#}");
-
-            (1, 1, fallback.to_vec(), false)
-        }
-        None => (1, 1, fallback.to_vec(), false),
+    picture: Option<&Picture>,
+) -> wgpu::Texture {
+    let (width, height, pixels) = match picture {
+        Some(picture) => (picture.width, picture.height, picture.pixels.clone()),
+        None => (1, 1, fallback.to_vec()),
     };
 
     let size = wgpu::Extent3d {
@@ -558,7 +563,7 @@ fn picture_texture(
         size,
     );
 
-    (texture, is_picture)
+    texture
 }
 
 /// Rewrites the single pixel of a one-pixel texture.
@@ -596,13 +601,51 @@ fn background_pixel(background: [f32; 4]) -> [u8; 4] {
     [rgb[0], rgb[1], rgb[2], 255]
 }
 
-/// Reads a picture off the disk as `(width, height, RGBA8)`.
-fn load_picture(path: &Path) -> anyhow::Result<(u32, u32, Vec<u8>)> {
-    let picture = image::open(path)
-        .map_err(|error| anyhow!("reading {}: {error}", path.display()))?
-        .to_rgba8();
+/// A picture read off the disk: its size, its pixels as RGBA8, and whether the
+/// file itself carried an alpha channel.
+///
+/// The last part matters for the overlay. A file with no alpha channel — a
+/// three-channel PNG, or any JPEG — comes out of the decoder with every pixel
+/// opaque, so as an overlay it covers the screen rather than laying over it,
+/// and that is worth saying out loud when it is loaded.
+#[derive(Debug)]
+struct Picture {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    has_alpha: bool,
+}
 
-    Ok((picture.width(), picture.height(), picture.into_raw()))
+/// Reads a picture off the disk. The pixels always come out RGBA8, whatever the
+/// file held.
+fn load_picture(path: &Path) -> anyhow::Result<Picture> {
+    let picture = image::open(path).map_err(|error| anyhow!("reading {}: {error}", path.display()))?;
+    // Asked before converting: the conversion to RGBA8 adds an alpha channel
+    // whatever the file had, which is exactly what the caller wants to know.
+    let has_alpha = picture.color().has_alpha();
+    let picture = picture.to_rgba8();
+
+    Ok(Picture {
+        width: picture.width(),
+        height: picture.height(),
+        pixels: picture.into_raw(),
+        has_alpha,
+    })
+}
+
+/// The picture a config named, or `None` when it named none — reporting one that
+/// cannot be read, the way a setting that is not there keeps its default.
+fn read_picture(image: Option<&Path>) -> Option<Picture> {
+    let path = image?;
+
+    match load_picture(path) {
+        Ok(picture) => Some(picture),
+        Err(error) => {
+            eprintln!("{WINDOW_TITLE}: {error:#}");
+
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -614,6 +657,9 @@ mod tests {
     use crate::terminal::Terminal;
     use crate::terminal::font::Font;
 
+    use image::{ExtendedColorType, ImageEncoder, codecs::png::PngEncoder};
+
+    use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
 
     #[test]
@@ -702,29 +748,64 @@ mod tests {
         assert_eq!(NO_OVERLAY, [0, 0, 0, 0], "nothing over the image");
     }
 
+    /// Writes a PNG of `pixels` — RGBA8 or RGB8, whichever `color` says — and
+    /// hands back its path.
+    fn write_png(name: &str, pixels: &[u8], width: u32, height: u32, color: ExtendedColorType) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("hext-{name}-{}.png", std::process::id()));
+        let file = std::fs::File::create(&path).expect("a file to write into");
+
+        PngEncoder::new(file)
+            .write_image(pixels, width, height, color)
+            .expect("writing the picture");
+
+        path
+    }
+
     #[test]
     fn a_picture_is_read_as_its_own_pixels() {
-        use image::{ExtendedColorType, ImageEncoder, codecs::png::PngEncoder};
-
         let pixels = [
             255, 0, 0, 255, // top left, red
             0, 255, 0, 255, // top right, green
             0, 0, 255, 255, // bottom left, blue
             255, 255, 255, 255, // bottom right, white
         ];
-        let path = std::env::temp_dir().join(format!("hext-picture-{}.png", std::process::id()));
-        let file = std::fs::File::create(&path).expect("a file to write into");
-
-        PngEncoder::new(file)
-            .write_image(&pixels, 2, 2, ExtendedColorType::Rgba8)
-            .expect("writing the picture");
-
-        let (width, height, read) = load_picture(&path).expect("reading it back");
+        let path = write_png("picture", &pixels, 2, 2, ExtendedColorType::Rgba8);
+        let picture = load_picture(&path).expect("reading it back");
 
         std::fs::remove_file(&path).ok();
 
-        assert_eq!((width, height), (2, 2));
-        assert_eq!(read, pixels, "in reading order, row by row");
+        assert_eq!((picture.width, picture.height), (2, 2));
+        assert_eq!(picture.pixels, pixels, "in reading order, row by row");
+        assert!(picture.has_alpha, "the file carried an alpha channel");
+    }
+
+    #[test]
+    fn a_picture_with_no_alpha_channel_comes_back_opaque() {
+        // The decoder adds an alpha channel to a file that has none, so an
+        // overlay made of one is opaque everywhere — which is what the flag
+        // `has_alpha` is there to report.
+        let pixels = [
+            255, 0, 0, // top left, red
+            0, 255, 0, // top right, green
+            0, 0, 255, // bottom left, blue
+            255, 255, 255, // bottom right, white
+        ];
+        let path = write_png("no-alpha", &pixels, 2, 2, ExtendedColorType::Rgb8);
+        let picture = load_picture(&path).expect("reading it back");
+
+        std::fs::remove_file(&path).ok();
+
+        assert!(!picture.has_alpha, "the file carried no alpha channel");
+        assert_eq!(
+            picture.pixels,
+            [
+                255, 0, 0, 255, //
+                0, 255, 0, 255, //
+                0, 0, 255, 255, //
+                255, 255, 255, 255,
+            ],
+            "every pixel opaque, in reading order"
+        );
     }
 
     #[test]

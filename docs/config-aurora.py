@@ -193,7 +193,9 @@ animate = True
 
 # Colours, as (r, g, b) in 0.0..=1.0. The sky is drawn by the shader, so the
 # background colour is only what the window is cleared to before it — and what
-# the grid's unpainted cells fall back to if the shader stops using it.
+# the grid's unpainted cells fall back to if the shader stops using it. A
+# `background_image` is not used here either: the shader draws the backdrop
+# instead of sampling the one the app loaded.
 background = (0.02, 0.02, 0.05)
 cursor_color = (0.20, 0.95, 0.60)
 

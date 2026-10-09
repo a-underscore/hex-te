@@ -88,11 +88,16 @@ fn fs_screen(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 
     // The grid is ink rather than a picture: its alpha is how much of a pixel
     // the cell covers, so a cell with a background of its own is opaque and
-    // everything else lets the backdrop through. With no picture in the config
-    // the backdrop is one pixel of the background colour, and this comes out as
-    // the plain colour it always was.
+    // everything else lets the backdrop through.
     let ink = textureSample(screen_tex, screen_sampler, uv);
-    let backdrop = textureSample(background_tex, screen_sampler, uv).rgb;
+
+    // The backdrop is the picture the config named, over the background colour
+    // the terminal holds: all four of the picture's channels matter, so a
+    // transparent part of it shows the colour through — a shape, rather than a
+    // rectangle. With no picture at all the texture is one opaque pixel of that
+    // same colour, so this comes out as the plain colour it always was.
+    let picture = textureSample(background_tex, screen_sampler, uv);
+    let backdrop = mix(screen.background.rgb, picture.rgb, picture.a);
     var color = mix(backdrop, ink.rgb, ink.a);
 
     if (screen.cursor_visible != 0u && all(cell == screen.cursor)) {

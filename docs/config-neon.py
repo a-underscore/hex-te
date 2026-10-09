@@ -250,6 +250,8 @@ animate = True
 # The two colours the config owns, as (r, g, b) in 0.0..=1.0. The sky is drawn
 # by the shader above, so `background` is mostly the colour the window is cleared
 # to before it; it is also what a render function would read back out of
-# `world.terminal()`. The cursor is the theme's cyan, which the shader draws.
+# `world.terminal()`. A `background_image` would not show either: the shader
+# draws the backdrop instead of sampling the one the app loaded. The cursor is
+# the theme's cyan, which the shader draws.
 background = (0.04, 0.01, 0.11)
 cursor_color = (0.15, 0.95, 1.00)

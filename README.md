@@ -215,6 +215,12 @@ that asked for a colour of its own — stay opaque on top of the picture.
 A picture that cannot be read is reported and the `background` colour used
 instead, the way a config file that cannot be evaluated keeps the defaults.
 
+The picture's own alpha is part of the composite: it is drawn *over* the
+`background` colour rather than in place of it, so a PNG with transparent parts
+shows that colour through them — the shape, over the terminal's colour. An
+alpha channel is not required: a picture without one simply covers the colour,
+which is what a wallpaper does.
+
 ### A picture over the grid
 
 `foreground_image` is the other side of the same idea: a picture stretched over
@@ -227,6 +233,13 @@ repeated: at these cell sizes (about ten by eighteen pixels) a grille drawn at
 one line every third source pixel comes out as a fine weave over the text, and
 anything much stronger than a quarter of the way to black will eat into the
 glyphs instead of tinting them.
+
+An overlay has to be transparent somewhere to be an overlay at all, and the
+decoder cannot invent that: a file with no alpha channel — a three-channel PNG,
+or any JPEG — becomes opaque everywhere, and covers the screen instead of lying
+over it. hext says so when it loads one. The screenshots in `docs/` are
+three-channel, which is why they are pictures *of* the terminal rather than
+masks for one:
 
 ### Custom shaders
 
@@ -251,7 +264,7 @@ app does not know which ones it will find:
 | `@group(0) @binding(0)` | A `Screen` uniform: `background`, `cursor_color`, `resolution`, `grid`, `cursor`, `cursor_visible`, `cursor_style`, `cursor_size`, and `time` — seconds since the app started, for a shader that moves |
 | `@group(0) @binding(1)` | The screen texture: the grid as ink, in sRGB bytes, with the alpha saying how much of each pixel a cell covers |
 | `@group(0) @binding(2)` | A sampler for that texture |
-| `@group(0) @binding(3)` | The `background_image` picture, stretched over the window — or one pixel of `background` when the config named none |
+| `@group(0) @binding(3)` | The `background_image` picture, stretched over the window and composited by its own alpha over `background` — or one opaque pixel of `background` when the config named none |
 | `@group(0) @binding(4)` | The `foreground_image` picture, stretched the same way — or one transparent pixel when the config named none |
 
 `vs_screen` draws one fullscreen triangle from `@builtin(vertex_index)` and
