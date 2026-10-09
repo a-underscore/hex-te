@@ -2,6 +2,10 @@
 
 A GPU-rendered terminal emulator in Rust, built on `winit` and `wgpu`.
 
+The grid is drawn on the CPU into a texture and composited on the GPU, and the
+look is a Python file: colours, the shader the screen is drawn with, and the two
+pictures that can go behind and in front of it.
+
 ```sh
 cargo run   # the terminal
 cargo test  # unit and shader tests
@@ -30,6 +34,11 @@ A fresh prompt, the window filled by the configured background:
 The colour swatch again, from a later capture:
 
 ![The 16 ANSI colour swatch again](docs/screenshot-4-colours.png)
+
+A selection — dragging the left button draws the band in inverse video — under a
+shadow-mask overlay, which is a `foreground_image` drawn over everything:
+
+![A selection under a shadow mask overlay](docs/screenshot-5-selection.png)
 
 ## Current behavior
 
@@ -94,9 +103,9 @@ The colour swatch again, from a later capture:
 - Resizes the PTY (`SIGWINCH`) to match the grid, and recomputes the grid from the
   window dimensions and font metrics on every redraw.
 - Closes the window when the shell exits.
-- Holds its own resources — the GPU, the font, the grid and the shell — as
-  components of one entity in an entity-component world, and handles events in a
-  system that borrows them back out of that world.
+- Holds its own resources — the GPU, the font, the grid, the shell and the
+  clipboard — as components of one entity in an entity-component world, and
+  handles events in a system that borrows them back out of that world.
 - Finishes every frame with a `Drawable` — the screen pipeline, its bind group
   and the uniform the shader reads — which first runs the world's render
   pipeline, so the systems a config file registered can shape the frame that is
@@ -365,5 +374,8 @@ The ambient values reach a renderer as `world::AmbientUniform`: a padding-free
   through `python3` on `PATH` (or `PYO3_PYTHON`).
 
 `cargo test` covers the grid, the world and the config, and validates the shader
-without needing a GPU or a PTY. The config tests need a Python interpreter, and
-the tests that rasterize glyphs need a system monospace font.
+without needing a GPU or a PTY. The config tests need a Python interpreter, the
+tests that rasterize glyphs need a system monospace font, and the clipboard test
+needs a session to talk to: it is skipped rather than failed when there is none,
+which is also how the app itself treats a session with no clipboard — selecting
+still works, and only the copy is missing.
