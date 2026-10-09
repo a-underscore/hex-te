@@ -7,13 +7,15 @@
 //! asking the surface for an image, laying the grid out, and presenting.
 
 use std::borrow::Cow;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use anyhow::anyhow;
 use winit::event::Event;
 
 use crate::WINDOW_TITLE;
 use crate::control::Control;
-use crate::terminal::Terminal;
+use crate::terminal::{Terminal, srgb};
 use crate::world::{RENDER_PIPELINE, SystemManager, World};
 
 const SCREEN_SHADER: &str = include_str!("shaders/screen.wgsl");
@@ -89,6 +91,10 @@ pub(crate) struct Drawable {
     sampler: wgpu::Sampler,
     buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// The picture the grid is drawn over. It is held here because the bind
+    /// group only has a view of it, and the bind group is rebuilt whenever the
+    /// terminal's own texture is replaced.
+    background_view: wgpu::TextureView,
     screen: ScreenUniforms,
 }
 
@@ -96,7 +102,9 @@ impl Drawable {
     /// Builds the screen pipeline that every frame is drawn with.
     ///
     /// `background` and `cursor_color` come from the config file, as `r, g, b, a`,
-    /// and `shader` is the WGSL source the config wrote, when it wrote one.
+    /// `shader` is the WGSL source the config wrote, when it wrote one, and
+    /// `background_image` is the picture it wants behind the grid, when it named
+    /// one.
     pub(crate) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -104,6 +112,7 @@ impl Drawable {
         background: [f32; 4],
         cursor_color: [f32; 4],
         shader: Option<&str>,
+        background_image: Option<&Path>,
     ) -> Self {
         let screen_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(WINDOW_TITLE),
@@ -137,6 +146,19 @@ impl Drawable {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // The picture behind the grid. A config that named none still
+                // gets a texture here: one pixel of the background colour, so
+                // the shader has nothing to special-case.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -211,7 +233,17 @@ impl Drawable {
         });
         queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&screen));
 
-        let bind_group = create_screen_bind_group(device, &layout, &buffer, &screen_view, &sampler);
+        let background_view = background_texture(device, queue, background, background_image)
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bind_group = create_screen_bind_group(
+            device,
+            &layout,
+            &buffer,
+            &screen_view,
+            &sampler,
+            &background_view,
+        );
 
         Self {
             pipeline,
@@ -219,6 +251,7 @@ impl Drawable {
             sampler,
             buffer,
             bind_group,
+            background_view,
             screen,
         }
     }
@@ -230,8 +263,14 @@ impl Drawable {
     pub(crate) fn bind_texture(&mut self, device: &wgpu::Device, texture: &wgpu::Texture) {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        self.bind_group =
-            create_screen_bind_group(device, &self.layout, &self.buffer, &view, &self.sampler);
+        self.bind_group = create_screen_bind_group(
+            device,
+            &self.layout,
+            &self.buffer,
+            &view,
+            &self.sampler,
+            &self.background_view,
+        );
     }
 
     /// How big the surface is, in physical pixels, which the shader needs to
@@ -301,6 +340,7 @@ fn create_screen_bind_group(
     buffer: &wgpu::Buffer,
     view: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
+    background: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(WINDOW_TITLE),
@@ -318,13 +358,95 @@ fn create_screen_bind_group(
                 binding: 2,
                 resource: wgpu::BindingResource::Sampler(sampler),
             },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(background),
+            },
         ],
     })
 }
 
+/// The picture the grid is drawn over: the file the config named, or a single
+/// pixel of the configured background colour, so that the shader always has one
+/// to sample. A picture that cannot be read is reported and the colour used
+/// instead, the way a config that cannot be evaluated keeps the defaults.
+fn background_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    background: [f32; 4],
+    image: Option<&Path>,
+) -> wgpu::Texture {
+    let (width, height, pixels) = match image.map(load_background) {
+        Some(Ok(picture)) => picture,
+        Some(Err(error)) => {
+            eprintln!("{WINDOW_TITLE}: {error:#}");
+
+            (1, 1, background_pixel(background))
+        }
+        None => (1, 1, background_pixel(background)),
+    };
+
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(WINDOW_TITLE),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+
+    texture
+}
+
+/// One pixel of the background colour, opaque: what the backdrop is when the
+/// config named no picture, so the shader always has a texture to sample.
+fn background_pixel(background: [f32; 4]) -> Vec<u8> {
+    let mut pixel = srgb(background).to_vec();
+
+    pixel.push(255);
+
+    pixel
+}
+
+/// Reads a picture off the disk as `(width, height, RGBA8)`.
+fn load_background(path: &Path) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    let picture = image::open(path)
+        .map_err(|error| anyhow!("reading {}: {error}", path.display()))?
+        .to_rgba8();
+
+    Ok((picture.width(), picture.height(), picture.into_raw()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CURSOR_BLOCK, SCREEN_SHADER, ScreenUniforms, screen_shader};
+    use super::{
+        CURSOR_BLOCK, SCREEN_SHADER, ScreenUniforms, background_pixel, load_background,
+        screen_shader,
+    };
     use crate::font::Font;
     use crate::terminal::Terminal;
 
@@ -366,5 +488,45 @@ mod tests {
         assert_eq!(screen.cursor, [2, 0]);
         assert_eq!(screen.cursor_visible, 0);
         assert_eq!(screen.cursor_style, 1, "the bar `DECSCUSR` asked for");
+    }
+
+    #[test]
+    fn a_config_without_a_picture_gets_one_pixel_of_the_background() {
+        let pixel = background_pixel([1.0, 0.0, 0.0, 1.0]);
+
+        assert_eq!(pixel, [255, 0, 0, 255], "one pixel, and opaque");
+    }
+
+    #[test]
+    fn a_picture_is_read_as_its_own_pixels() {
+        use image::{ExtendedColorType, ImageEncoder, codecs::png::PngEncoder};
+
+        let pixels = [
+            255, 0, 0, 255, // top left, red
+            0, 255, 0, 255, // top right, green
+            0, 0, 255, 255, // bottom left, blue
+            255, 255, 255, 255, // bottom right, white
+        ];
+        let path = std::env::temp_dir().join(format!("hext-picture-{}.png", std::process::id()));
+        let file = std::fs::File::create(&path).expect("a file to write into");
+
+        PngEncoder::new(file)
+            .write_image(&pixels, 2, 2, ExtendedColorType::Rgba8)
+            .expect("writing the picture");
+
+        let (width, height, read) = load_background(&path).expect("reading it back");
+
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!((width, height), (2, 2));
+        assert_eq!(read, pixels, "in reading order, row by row");
+    }
+
+    #[test]
+    fn a_picture_that_is_not_there_names_itself_in_the_error() {
+        let path = std::env::temp_dir().join("hext-no-such-picture.png");
+        let error = load_background(&path).expect_err("a picture that is not there");
+
+        assert!(error.to_string().contains("hext-no-such-picture.png"));
     }
 }

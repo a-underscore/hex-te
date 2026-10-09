@@ -211,20 +211,22 @@ impl Terminal {
     /// Paints the whole grid into an RGBA buffer, in the sRGB bytes the screen
     /// texture stores.
     ///
-    /// Every cell paints its own background, blank or not, so the shader has
-    /// nothing to add and an erased cell keeps the colour the shell asked for.
-    /// Glyph coverage is blended between that background and the cell's
-    /// foreground.
+    /// The alpha says how much of a pixel the grid covers, rather than always
+    /// being solid: a cell that asked for a background of its own fills it in
+    /// opaque, and every other cell leaves the picture the drawable puts behind
+    /// the screen showing through. Glyph coverage is the alpha of the ink the
+    /// character is drawn with, so the two composite together in the shader.
     fn rasterize(&self, w: usize, h: usize) -> Vec<u8> {
         let mut buffer = vec![0u8; w * h * 4];
         // `DECSCNM` reverses the whole screen, so even the colour behind the
-        // text is the other one.
+        // text is the other one — and a reversed screen has no transparency in
+        // it, because the background *is* the ink.
         let reverse = self.screen.reverse;
         let background = self.palette.background(reverse);
 
         for pixel in buffer.chunks_exact_mut(4) {
             pixel[..3].copy_from_slice(&background);
-            pixel[3] = 255;
+            pixel[3] = if reverse { 255 } else { 0 };
         }
 
         let (cols, rows) = self.size;
@@ -273,7 +275,22 @@ impl Terminal {
                     height,
                 };
 
-                glyphs::fill_rect(&mut buffer, w, h, rect, paint.bg);
+                // A cell with a background of its own paints it in first.
+                if paint.opaque {
+                    glyphs::fill_rect(&mut buffer, w, h, rect, paint.bg);
+                }
+
+                // Ink lands on whatever the cell has behind it: on its own
+                // background when it asked for one, and on the texture's alpha
+                // when it did not, so that the picture behind the grid shows
+                // through the gaps.
+                let mut ink = |piece: Rect, coverage: u8, color: [u8; 3]| {
+                    if paint.opaque {
+                        glyphs::blend_rect(&mut buffer, w, h, piece, paint.bg, color, coverage);
+                    } else {
+                        glyphs::fill_alpha_rect(&mut buffer, w, h, piece, color, coverage);
+                    }
+                };
 
                 // A cell that asked for `SGR 5` keeps its background but loses
                 // everything drawn over it on the invisible half of the blink.
@@ -286,21 +303,9 @@ impl Terminal {
                     // drawing, the blocks, the braille and the rest — come out
                     // of the cell's own rectangle, so that they always meet the
                     // cell next to them. Anything else is the font's to draw.
-                    let drawn = {
-                        let mut piece = |piece: Rect, coverage: u8| {
-                            glyphs::blend_rect(
-                                &mut buffer,
-                                w,
-                                h,
-                                piece,
-                                paint.bg,
-                                paint.fg,
-                                coverage,
-                            );
-                        };
-
-                        glyphs::draw(cell.ch, rect, &mut piece)
-                    };
+                    let drawn = glyphs::draw(cell.ch, rect, &mut |piece, coverage| {
+                        ink(piece, coverage, paint.fg)
+                    });
 
                     if !drawn {
                         let (metrics, bitmap) = font.rasterize(
@@ -336,10 +341,16 @@ impl Terminal {
                                         continue;
                                     }
 
-                                    let pixel = (y as usize * w + x as usize) * 4;
-                                    let blended = glyphs::blend(paint.bg, paint.fg, coverage);
-
-                                    buffer[pixel..pixel + 3].copy_from_slice(&blended);
+                                    ink(
+                                        Rect {
+                                            x,
+                                            y,
+                                            width: 1,
+                                            height: 1,
+                                        },
+                                        coverage,
+                                        paint.fg,
+                                    );
                                 }
                             }
                         }
@@ -349,10 +360,6 @@ impl Terminal {
                 // The decorations are rules rather than glyphs: the font does
                 // not have to have them, and they take the cell's own colours.
                 if !hidden {
-                    let mut ink = |piece: Rect, coverage: u8, color: [u8; 3]| {
-                        glyphs::blend_rect(&mut buffer, w, h, piece, paint.bg, color, coverage);
-                    };
-
                     if let Some(style) = cell.attrs.underline() {
                         let color = paint.underline;
 
@@ -707,7 +714,20 @@ impl Palette {
             color => self.resolve(color, self.foreground),
         };
 
-        Paint { fg, bg, underline }
+        // A cell that asked for a background of its own covers whatever is
+        // behind the grid for its whole rectangle, and so does one that has
+        // been inverted or a screen that is drawn upside down. Every other cell
+        // leaves the bare background showing, which is what lets a picture
+        // through.
+        let opaque =
+            !matches!(cell.bg, Color::Default) || cell.attrs.contains(Attrs::INVERSE) || reverse;
+
+        Paint {
+            fg,
+            bg,
+            underline,
+            opaque,
+        }
     }
 
     /// The colour behind everything, which `DECSCNM` swaps for the foreground
@@ -762,10 +782,13 @@ struct Paint {
     fg: [u8; 3],
     bg: [u8; 3],
     underline: [u8; 3],
+    /// Whether `bg` is painted opaquely over the whole cell, or the cell is
+    /// left as ink on nothing.
+    opaque: bool,
 }
 
 /// The sRGB encoding of a linear `r, g, b` colour, in bytes.
-fn srgb(color: [f32; 4]) -> [u8; 3] {
+pub(crate) fn srgb(color: [f32; 4]) -> [u8; 3] {
     let encode = |value: f32| -> u8 {
         let value = value.clamp(0.0, 1.0);
         let encoded = if value <= 0.003_130_8 {
@@ -2239,6 +2262,22 @@ mod tests {
 
         // What `0.05, 0.06, 0.08` encoded to when the shader added it by hand.
         assert_eq!(&pixels[0..3], &[63, 69, 80]);
+        assert_eq!(pixels[3], 0, "and leaves the picture behind showing");
+    }
+
+    #[test]
+    fn ink_keeps_its_coverage_as_alpha() {
+        let mut terminal = terminal();
+        terminal.update_grid_size(64, 32);
+        // A light shade in the first cell: the whole cell, inked by a quarter.
+        terminal.feed(b"\x1b[31m\xe2\x96\x91");
+
+        let pixels = terminal.rasterize(64, 32);
+        let (x, y) = (2, 2);
+        let pixel = &pixels[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4];
+
+        assert_eq!(pixel[..3], ANSI[1], "the ink keeps its own colour");
+        assert_eq!(pixel[3], 64, "and carries its coverage as the alpha");
     }
 
     #[test]
@@ -2250,6 +2289,7 @@ mod tests {
         let pixels = terminal.rasterize(64, 32);
 
         assert_eq!(&pixels[0..3], &ANSI[1]);
+        assert_eq!(pixels[3], 255, "a background of its own covers the picture");
     }
 
     #[test]

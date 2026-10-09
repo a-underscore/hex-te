@@ -96,6 +96,10 @@ The colour swatch again, from a later capture:
   about to be drawn.
 - Lets the config file add systems of its own, so Python can shape the running
   app rather than only fill in settings.
+- Draws the screen as ink over a backdrop: the screen texture carries how much of
+  each pixel the grid covers in its alpha, so a picture named by
+  `background_image` shows through every cell a program left unpainted, and a
+  cell that asked for a colour of its own covers it.
 
 Not implemented yet: wide (CJK) double-width cells, scrollback, the alternate
 screen, mouse reporting and text selection, the second half of the Symbols for
@@ -120,12 +124,30 @@ These are the names the file documents:
 | `shell` | Program to run inside the pty; `None` means `$SHELL` |
 | `background`, `cursor_color` | Colours, as `(r, g, b)` floats in `0.0..=1.0` |
 | `shader` | The WGSL the screen is drawn with, as source; `None` keeps the built-in one |
+| `background_image` | A PNG or JPEG to draw behind the grid; `None` keeps the `background` colour |
 
-`shader` is the one setting that is applied today: the app builds the screen
-pipeline from that source, so the shader is part of `config.py` and changing it is
-a restart rather than a rebuild. The rest of the names above are documented but
-not read back yet. The file is read once, when the app starts, so restart it to
-pick up an edit; a window manager is free to override the requested window size.
+`shader` and `background_image` are the settings that are applied today: the app
+builds the screen pipeline from that source and loads that picture, so both are
+part of `config.py` and changing them is a restart rather than a rebuild. The
+rest of the names above are documented but not read back yet. The file is read
+once, when the app starts, so restart it to pick up an edit; a window manager is
+free to override the requested window size.
+
+### A picture behind the grid
+
+`background_image` names a picture — `background_image = "/home/you/wall.png"`
+— which is stretched over the window and drawn under the text. The screen texture
+is ink rather than a picture: its alpha says how much of each pixel a cell covers,
+so the picture shows through wherever a program left a cell unpainted.
+
+That means a full-screen program which paints its own background covers the
+picture, and Neovim does exactly that by default: set `hi Normal guibg=NONE
+ctermbg=NONE` (or `:set notermguicolors`) and its cells go back to the terminal's
+ow colour. Highlighted regions, a status line, a `\x1b[41m` background — anything
+that asked for a colour of its own — stay opaque on top of the picture.
+
+A picture that cannot be read is reported and the `background` colour used
+instead, the way a config file that cannot be evaluated keeps the defaults.
 
 ### Custom shaders
 
@@ -148,8 +170,9 @@ app does not know which ones it will find:
 | Binding | What it is |
 | --- | --- |
 | `@group(0) @binding(0)` | A `Screen` uniform: `background`, `cursor_color`, `resolution`, `grid`, `cursor`, `cursor_visible`, `cursor_style`, `cursor_size` |
-| `@group(0) @binding(1)` | The screen texture: the finished grid, in sRGB bytes |
+| `@group(0) @binding(1)` | The screen texture: the grid as ink, in sRGB bytes, with the alpha saying how much of each pixel a cell covers |
 | `@group(0) @binding(2)` | A sampler for that texture |
+| `@group(0) @binding(3)` | The `background_image` picture, stretched over the window — or one pixel of `background` when the config named none |
 
 `vs_screen` draws one fullscreen triangle from `@builtin(vertex_index)` and
 `fs_screen` returns a colour for `@builtin(position)`. `src/shaders/screen.wgsl`
@@ -160,6 +183,20 @@ be read instead of pasted:
 ```python
 shader = open("/home/you/.config/hext/crt.wgsl").read()
 ```
+
+Because the screen texture is ink rather than a finished picture, the one line a
+shader usually has to start with is the composite:
+
+```wgsl
+let ink = textureSample(screen_tex, screen_sampler, uv);
+let backdrop = textureSample(background_tex, screen_sampler, uv).rgb;
+var color = mix(backdrop, ink.rgb, ink.a);
+```
+
+Effect shaders spread that line out — the aberration in the CRT config shifts the
+texture sideways per channel, so the alpha comes from the unshifted sample and the
+colour from the shifted ones. Anything that ignores the alpha shows the plain
+`background` colour behind the text whatever `background_image` says.
 
 `fs_screen` is also where the cursor is drawn: the uniform says which cell it is
 in, what shape it has and whether it is shown at all. The reference shader draws
@@ -236,15 +273,15 @@ the components the terminal draws with are not exposed to Python yet.
 | `src/app.rs` | The winit glue: turns events into `Control` values and runs them through the systems |
 | `src/config.rs` | Writes and evaluates the Python `config.py` through `pyo3` |
 | `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
-| `src/terminal.rs` | The VT parser and character grid, key encoding, and the rasterizer that paints cells and glyphs into the screen texture |
+| `src/terminal.rs` | The VT parser and character grid, key encoding, and the rasterizer that paints cells and glyphs into the screen texture, as ink on nothing |
 | `src/glyphs.rs` | The characters the terminal draws itself, out of the cell's rectangle: box drawing, blocks, braille, sextants and the Powerline wedges |
 | `src/font.rs` | Loads the system monospace family — regular, bold and italic — and answers rasterization requests |
 | `src/gpu.rs` | Owns the window, the surface, the device and the drawable, and drives one frame |
-| `src/drawable.rs` | The draw a frame ends with: the screen pipeline, the bind group, the uniform, and the render systems a config file can add |
+| `src/drawable.rs` | The draw a frame ends with: the screen pipeline, the bind group, the uniform, the picture behind the grid, and the render systems a config file can add |
 | `src/world/` | The entity-component world: the entity store, the system manager, and the ambient values |
 | `src/control.rs` | The event value a system is handed each turn, plus its `exit` flag |
 | `src/id.rs` | The `Id` entity handle |
-| `src/shaders/screen.wgsl` | Draws the screen texture and cursor overlay |
+| `src/shaders/screen.wgsl` | Composites the grid over the background picture and draws the cursor overlay |
 
 Data flows one way around the loop: keystrokes are encoded and written to the PTY,
 the shell echoes and prints, the reader thread collects the bytes and wakes the

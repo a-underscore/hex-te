@@ -390,6 +390,7 @@ impl ApplicationHandler<UserEvent> for App {
             config.background,
             config.cursor_color,
             config.shader.as_deref(),
+            config.background_image.as_deref(),
         )) {
             Ok(gpu) => gpu,
             Err(error) => {

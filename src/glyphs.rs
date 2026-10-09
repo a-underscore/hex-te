@@ -694,8 +694,25 @@ fn inside(points: [(i32, i32); 3], x: f32, y: f32) -> bool {
 
 /// Fills `rect` with `color`, clipped to the buffer.
 pub(crate) fn fill_rect(buffer: &mut [u8], w: usize, h: usize, rect: Rect, color: [u8; 3]) {
+    fill_alpha_rect(buffer, w, h, rect, color, 255);
+}
+
+/// Fills `rect` with `color` at `alpha`, clipped to the buffer: the ink a cell
+/// with no background of its own is drawn with, where the alpha is how much of
+/// the pixel the ink covers rather than how solid it is. Nothing is blended
+/// here — the picture behind the grid is not in this buffer, and the shader
+/// puts it back with the alpha.
+pub(crate) fn fill_alpha_rect(
+    buffer: &mut [u8],
+    w: usize,
+    h: usize,
+    rect: Rect,
+    color: [u8; 3],
+    alpha: u8,
+) {
     for_each_pixel(buffer, w, h, rect, |pixel| {
         pixel[..3].copy_from_slice(&color);
+        pixel[3] = alpha;
     });
 }
 

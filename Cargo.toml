@@ -20,6 +20,10 @@ portable-pty = "0.9.0"
 fontdb = "0.24.0"
 fontdue = "0.9.4"
 
+# The picture a config can put behind the grid: PNG and JPEG are enough for a
+# wallpaper, and the rest of `image`'s decoders would be dead weight.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+
 bytemuck = { version = "1.25.2", features = ["derive"] }
 anyhow = "1.0.100"
 env = "1.0.1"

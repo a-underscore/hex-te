@@ -34,6 +34,9 @@ pub(crate) struct Config {
     /// The WGSL the screen pipeline is built from, as source. `None` keeps the
     /// shader compiled into the binary, which is what the app ships with.
     pub shader: Option<String>,
+    /// A picture to draw behind the grid. `None` draws the plain background
+    /// colour, which is what the shader does when no picture is there at all.
+    pub background_image: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -45,6 +48,7 @@ impl Default for Config {
             background: [0.05, 0.06, 0.08, 1.0],
             cursor_color: [0.16, 0.72, 0.72, 1.0],
             shader: None,
+            background_image: None,
         }
     }
 }
@@ -56,8 +60,9 @@ const DEFAULT_CONFIG: &str = r#"# hext configuration.
 # This file is Python: the host evaluates it with an embedded interpreter, so
 # anything that produces the right value works. Every name is optional, and one
 # that is missing or of the wrong type falls back to the default shown here.
-# `shader` is the one setting the app reads back today; the others are written
-# out for the day they are wired up, so changing them has no effect yet.
+# `shader` and `background_image` are the settings the app reads back today; the
+# others are written out for the day they are wired up, so changing them has no
+# effect yet.
 
 # Glyphs are rasterized at this size, in logical pixels.
 font_size = 16.0
@@ -80,6 +85,19 @@ cursor_color = (0.16, 0.72, 0.72)
 #
 #     shader = open("/home/you/.config/hext/crt.wgsl").read()
 shader = None
+
+# A picture to draw behind the grid, as the path to a PNG or a JPEG. The screen
+# is ink rather than a picture — its alpha says how much of a pixel each cell
+# covers — so the picture shows wherever a program left a cell unpainted:
+# Neovim's `hi Normal guibg=NONE ctermbg=NONE` (without it Neovim paints a
+# background on every cell, which covers the picture), or a shell that only
+# writes text. Anything that asked for a colour of its own stays opaque on top.
+#
+#     background_image = "/home/you/pictures/terminal.png"
+#
+# `None` shows the plain `background` colour instead, and a picture that cannot
+# be read is reported and the colour used.
+background_image = None
 
 # The app's entity-component world is bound here as `world`: the same object the
 # engine goes on using, so this file can seed it and set it up. It holds the
@@ -196,12 +214,24 @@ impl Config {
             py.run(source.as_c_str(), Some(&globals), None)?;
 
             config.shader = setting_text(&globals, "shader");
+            config.background_image = setting_path(&globals, "background_image");
 
             Ok(())
         })?;
 
         Ok(config)
     }
+}
+
+/// Reads a setting that holds a path.
+///
+/// A picture that cannot be opened is reported by whoever loads it, so all this
+/// does is take the name: an empty one is the same as not naming a picture at
+/// all.
+fn setting_path(globals: &Bound<'_, PyDict>, name: &str) -> Option<PathBuf> {
+    setting_text(globals, name)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Reads a setting that holds text.
@@ -495,5 +525,36 @@ mod tests {
     #[test]
     fn a_shader_setting_that_is_not_text_keeps_the_default() {
         assert_eq!(config("bad-shader", "shader = 42\n").shader, None);
+    }
+
+    #[test]
+    fn the_background_image_setting_is_the_path_the_config_wrote() {
+        let picture = config("background", "background_image = '/tmp/wall.png'\n");
+
+        assert_eq!(
+            picture.background_image.as_deref(),
+            Some(std::path::Path::new("/tmp/wall.png"))
+        );
+    }
+
+    #[test]
+    fn a_config_without_a_background_image_has_none() {
+        assert_eq!(
+            config("no-background", "font_size = 30.0\n").background_image,
+            None
+        );
+        assert_eq!(
+            config("none-background", "background_image = None\n").background_image,
+            None
+        );
+        assert_eq!(
+            config("empty-background", "background_image = ''\n").background_image,
+            None,
+            "an empty name is no picture at all"
+        );
+        assert_eq!(
+            config("bad-background", "background_image = 42\n").background_image,
+            None
+        );
     }
 }
