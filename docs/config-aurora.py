@@ -22,9 +22,9 @@
 # that will not start.
 shader = """
 // The aurora screen: a night sky with bands of light drifting across it, drawn
-// by the shader itself, with the grid inked over the top, a vignette, scanlines
-// and a little grain. `screen.time` is what makes it move; `animate = True`
-// below is what keeps `time` ticking.
+// by the shader itself, with the grid inked over the top, a vignette and
+// scanlines. `screen.time` is what makes it move; `animate = True` below is what
+// keeps `time` ticking.
 //
 // The struct matches the uniform `src/render/drawable.rs` writes, field for
 // field: the two colours, the resolution, the grid and cursor state, and the
@@ -59,8 +59,9 @@ fn vs_screen(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> 
     return vec4<f32>(corner * 2.0 - vec2<f32>(1.0), 0.0, 1.0);
 }
 
-// A number that jumps about between 0 and 1 for every pixel and every frame: the
-// dust the grain is made of.
+// A number that jumps about between 0 and 1 for every input, which is what the
+// dither below is made of. Only ever fed a pixel position, never the clock, so
+// the pattern it makes is fixed to the screen.
 fn hash(value: vec2<f32>) -> f32 {
     return fract(sin(dot(value, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 }
@@ -167,8 +168,12 @@ fn fs_screen(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     // Scanlines: every other line of the image is a little darker.
     color = color * (0.92 + 0.08 * sin(position.y * 3.14159265));
 
-    // Grain, so the flat parts of the sky are not perfectly flat.
-    color = color + (hash(position.xy + vec2<f32>(screen.time)) - 0.5) * 0.02;
+    // A one-step dither, so the flat parts of the sky do not band: a two
+    // hundred and fifty-fifth of a step, fixed to the pixel rather than to the
+    // frame. Noise that is redrawn every frame is what makes an animated image
+    // look grainy — the sky crawls — so `screen.time` is deliberately not part
+    // of it.
+    color = color + vec3<f32>((hash(position.xy) - 0.5) / 255.0);
 
     // Whatever the config put over everything goes over all of it: the glass in
     // front of the tube. There is nothing there here, but the composite is what
