@@ -43,11 +43,6 @@ The colour swatch again, from a later capture:
 
 ![The 16 ANSI colour swatch again](docs/screenshot-4-colours.png)
 
-A selection — dragging the left button draws the band in inverse video — under a
-shadow-mask overlay, which is a `foreground_image` drawn over everything:
-
-![A selection under a shadow mask overlay](docs/screenshot-5-selection.png)
-
 ## Current behavior
 
 - Spawns a shell on a PTY — `$SHELL`, or the program named in the config — and
