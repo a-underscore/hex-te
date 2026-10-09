@@ -99,12 +99,43 @@ impl<E: 'static> SystemManager<E> {
         Ok(())
     }
 
+    /// Runs the `update` of one pipeline's systems, leaving the other pipelines
+    /// alone.
+    ///
+    /// The renderer wants this: a render function is registered in a pipeline of
+    /// its own so that it runs once per frame, at the point the frame is drawn,
+    /// rather than once per event alongside the app's own systems.
+    pub fn update_pipeline(
+        &self,
+        pid: Id,
+        control: Arc<RwLock<Control<E>>>,
+        world: Arc<RwLock<World<E>>>,
+    ) -> anyhow::Result<()> {
+        for system in self.pipeline(pid) {
+            system
+                .lock()
+                .unwrap()
+                .update(Arc::clone(&control), Arc::clone(&world))?;
+        }
+
+        Ok(())
+    }
+
     /// Handles to the systems of every pipeline, ready to run.
     ///
     /// The pipelines are walked in an unspecified order; the systems of one
     /// pipeline run in the order they were added.
     fn snapshot(&self) -> Vec<Arc<Mutex<Box<dyn System<E>>>>> {
         self.pipelines.values().flatten().cloned().collect()
+    }
+
+    /// Handles to the systems of one pipeline, in the order they were added.
+    ///
+    /// Taken out of the map rather than run from underneath it, for the same
+    /// reason [`snapshot`](Self::snapshot) is: a system may reach back into the
+    /// manager while it runs.
+    fn pipeline(&self, pid: Id) -> Vec<Arc<Mutex<Box<dyn System<E>>>>> {
+        self.pipelines.get(&pid).cloned().unwrap_or_default()
     }
 }
 
@@ -189,6 +220,34 @@ mod tests {
             log.iter().filter(|line| line.starts_with("update")).count(),
             3
         );
+    }
+
+    #[test]
+    fn one_pipeline_can_be_run_on_its_own() {
+        // What the renderer does: the systems of the render pipeline run once
+        // per frame, and the app's own event systems do not run again with it.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let record = |systems: &mut SystemManager, pid| {
+            systems.add(
+                pid,
+                Recorder {
+                    log: Arc::clone(&log),
+                },
+            );
+        };
+
+        let mut systems = SystemManager::new();
+        record(&mut systems, 0);
+        record(&mut systems, 1);
+
+        systems.update_pipeline(1, control(), world()).unwrap();
+
+        assert_eq!(*log.lock().unwrap(), vec!["update(exit=false)".to_owned()]);
+
+        // A pipeline nothing was added to costs nothing and runs nothing.
+        systems.update_pipeline(2, control(), world()).unwrap();
+
+        assert_eq!(log.lock().unwrap().len(), 1);
     }
 
     #[test]

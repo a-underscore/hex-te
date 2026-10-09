@@ -13,6 +13,20 @@ use nalgebra::Vector3;
 
 use crate::id::Id;
 
+/// The pipeline the application's own systems live in: the ones that handle the
+/// events the event loop dispatches.
+///
+/// Pipelines are just numbers, and a program is free to use others of its own;
+/// these two are the ones the app itself assumes something about.
+pub const EVENT_PIPELINE: Id = 0;
+
+/// The pipeline the renderer runs: a system added to it is called once per
+/// frame, while the frame is being drawn, rather than once per event.
+///
+/// This is how a render function written in `config.py` is registered, which is
+/// why the name is bound in the config file as `render_pipeline`.
+pub const RENDER_PIPELINE: Id = 1;
+
 /// Shared world state. The [`EntityManager`] holds every entity and its
 /// components, the [`SystemManager`] the behaviour that runs over them, and the
 /// ambient fields are the global lighting values a renderer starts from.

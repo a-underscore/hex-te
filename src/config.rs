@@ -16,7 +16,7 @@ use crate::WINDOW_TITLE;
 use crate::app::UserEvent;
 use crate::control::Control;
 use crate::id::Id;
-use crate::world::{System, World};
+use crate::world::{RENDER_PIPELINE, System, World};
 
 /// The settings the app reads, and what it uses when the file does not say.
 #[derive(Clone)]
@@ -56,6 +56,8 @@ const DEFAULT_CONFIG: &str = r#"# hext configuration.
 # This file is Python: the host evaluates it with an embedded interpreter, so
 # anything that produces the right value works. Every name is optional, and one
 # that is missing or of the wrong type falls back to the default shown here.
+# `shader` is the one setting the app reads back today; the others are written
+# out for the day they are wired up, so changing them has no effect yet.
 
 # Glyphs are rasterized at this size, in logical pixels.
 font_size = 16.0
@@ -79,23 +81,46 @@ cursor_color = (0.16, 0.72, 0.72)
 #     shader = open("/home/you/.config/hext/crt.wgsl").read()
 shader = None
 
-# The app's entity-component world is bound here as `world`. It is the same
-# object the engine keeps using, so a config can seed or reconfigure it:
+# The app's entity-component world is bound here as `world`: the same object the
+# engine goes on using, so this file can seed it and set it up. It holds the
+# entities, and the ambient values a 3D pass starts from:
 #
-#   world.spawn(active=True) -> int    # add an entity
+#   world.spawn(active=True) -> int    # add an entity, returning its id
 #   world.despawn(entity)              # remove it again
 #   world.entities() -> [int]          # the ids of the active entities
 #   world.entity_count() -> int
 #   world.ambient_color = (r, g, b)    # base colour of the 3D lighting pass
 #   world.ambient_intensity = 1.0
 #
-# It also holds the systems the app runs, so a config can add behaviour of its
-# own. A Python function added as a system is called with the world once per
-# event the app dispatches:
+# The world also holds the systems, which is how this file adds behaviour of its
+# own. A system is an ordinary function taking the world; `pipeline` says when
+# it is called:
 #
-#   world.add_system(fn, pipeline=0)   # fn(world), every event
-#   world.remove_system(pipeline=0)    # drops the most recent one
+#   world.add_system(fn, pipeline=0)                 # fn(world), every event
+#   world.add_system(fn, pipeline=render_pipeline)   # fn(world), every frame
+#   world.remove_system(pipeline=0)                  # drops the most recent one
 #   world.system_count() -> int
+#
+# Pipeline 0 is the app's own: the function runs once per event the event loop
+# dispatches. `render_pipeline` is the frame — the function runs once per frame,
+# just before the screen is drawn over the image — which is how a render
+# function is written here:
+#
+#   frames = 0
+#
+#   def draw(world):
+#       global frames
+#       frames += 1
+#
+#   world.add_system(draw, pipeline=render_pipeline)
+#
+# Both kinds run on the event loop's thread, with none of the app's own locks
+# held, so a system may read and write the world it is handed — including
+# registering further systems, which join the next event or the next frame. A
+# frame is not an event, so a render function is handed the event that says the
+# loop has nothing left to do. What it can reach today is the world itself, the
+# entities and the ambient values: the components the terminal draws with are
+# not exposed to Python yet.
 "#;
 
 impl Config {
@@ -164,6 +189,9 @@ impl Config {
             let globals = PyDict::new(py);
 
             globals.set_item("world", Py::new(py, PyWorld { world })?)?;
+            // The pipeline the renderer runs, so a render function can be
+            // registered by name rather than by number.
+            globals.set_item("render_pipeline", RENDER_PIPELINE)?;
 
             py.run(source.as_c_str(), Some(&globals), None)?;
 
@@ -326,7 +354,7 @@ mod tests {
     use super::Config;
     use crate::app::UserEvent;
     use crate::control::Control;
-    use crate::world::World;
+    use crate::world::{EVENT_PIPELINE, RENDER_PIPELINE, World};
 
     use nalgebra::Vector3;
     use winit::event::Event;
@@ -403,6 +431,43 @@ mod tests {
 
         // The failed load leaves the world's systems alone.
         assert_eq!(world.read().unwrap().sm.read().unwrap().system_count(), 0);
+    }
+
+    #[test]
+    fn a_config_can_register_a_render_function() {
+        // A system in the render pipeline is a render function: it runs when a
+        // frame is drawn, and not with the events the app dispatches.
+        let path = scratch("render");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "def draw(world):\n    world.ambient_intensity += 1.0\n\nworld.add_system(draw, pipeline=render_pipeline)\n",
+        )
+        .unwrap();
+
+        let world = world();
+        assert!(Config::read_from(&path, Arc::clone(&world)).is_ok());
+
+        let systems = world.read().unwrap().systems();
+        systems
+            .update_pipeline(
+                EVENT_PIPELINE,
+                Control::new(Event::AboutToWait),
+                Arc::clone(&world),
+            )
+            .unwrap();
+
+        assert_eq!(world.read().unwrap().ambient_intensity, 0.0);
+
+        systems
+            .update_pipeline(
+                RENDER_PIPELINE,
+                Control::new(Event::AboutToWait),
+                Arc::clone(&world),
+            )
+            .unwrap();
+
+        assert_eq!(world.read().unwrap().ambient_intensity, 1.0);
     }
 
     /// A config file holding `source`, loaded without touching the systems.

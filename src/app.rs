@@ -4,7 +4,7 @@ use nalgebra::Vector3;
 
 use crate::control::Control;
 use crate::id::Id;
-use crate::world::{System, World};
+use crate::world::{EVENT_PIPELINE, System, World};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::font::Font;
 use crate::gpu::Gpu;
 use crate::pty::Pty;
-use crate::terminal::{Terminal, encode_key};
+use crate::terminal::{KeyModes, Terminal, encode_key};
 
 /// Wakes the event loop back up when the shell has something to say.
 #[derive(Debug)]
@@ -89,10 +89,12 @@ impl App {
         let world = Arc::clone(&self.world);
 
         // A snapshot of the systems, taken out of the world's own lock: the
-        // systems are free to reach back into the world while they run.
+        // systems are free to reach back into the world while they run. Only
+        // the event pipeline runs here — the render pipeline belongs to the
+        // frame, and runs when one is drawn.
         let systems = world.read().unwrap().systems();
 
-        if let Err(error) = systems.update(Arc::clone(&control), world) {
+        if let Err(error) = systems.update_pipeline(EVENT_PIPELINE, Arc::clone(&control), world) {
             eprintln!("{WINDOW_TITLE}: {error:#}");
         }
 
@@ -154,7 +156,8 @@ impl TerminalSystem {
         }
     }
 
-    /// Hands everything the reader thread collected to the VT parser.
+    /// Hands everything the reader thread collected to the VT parser, and
+    /// writes back the answer if the shell asked the terminal a question.
     fn pump(&self, world: &World<UserEvent>) {
         let Ok(mut pending) = self.pending.lock() else {
             return;
@@ -162,19 +165,56 @@ impl TerminalSystem {
         let output = std::mem::take(&mut *pending);
         drop(pending);
 
-        if let Some(terminal) = self.terminal(world) {
-            terminal.write().unwrap().feed(&output);
-        }
-    }
-
-    fn redraw(&self, world: &World<UserEvent>) {
-        self.pump(world);
-
-        let (Some(gpu), Some(terminal)) = (self.gpu(world), self.terminal(world)) else {
+        let Some(terminal) = self.terminal(world) else {
             return;
         };
 
-        if let Err(error) = gpu.write().unwrap().render(&mut terminal.write().unwrap()) {
+        let replies = {
+            let mut terminal = terminal.write().unwrap();
+
+            terminal.feed(&output);
+
+            // `DSR` and a device attributes request are the shell asking where
+            // the cursor is or what this terminal is; the answer goes back the
+            // way a keystroke does.
+            terminal.take_replies()
+        };
+
+        if !replies.is_empty()
+            && let Some(pty) = self.pty(world)
+            && let Err(error) = pty.read().unwrap().write(&replies)
+        {
+            eprintln!("{WINDOW_TITLE}: {error:#}");
+        }
+    }
+
+    /// Draws one frame: the terminal's grid first, then the renderer, which
+    /// finishes the frame with the world's own render systems.
+    ///
+    /// The world comes in by handle rather than by reference because those
+    /// systems run inside the draw, and a system is always free to reach back
+    /// into the world: no lock of the caller's may still be held by then.
+    fn redraw(&self, world: Arc<RwLock<World<UserEvent>>>) {
+        self.pump(&world.read().unwrap());
+
+        let (gpu, terminal, systems) = {
+            let world = world.read().unwrap();
+
+            let (Some(gpu), Some(terminal)) = (
+                world.component::<Gpu>(self.entity),
+                world.component::<Terminal>(self.entity),
+            ) else {
+                return;
+            };
+
+            (gpu, terminal, world.systems())
+        };
+
+        if let Err(error) =
+            gpu.write()
+                .unwrap()
+                .render(&mut terminal.write().unwrap(), Arc::clone(&world), systems)
+        {
             eprintln!("{WINDOW_TITLE}: {error:#}");
         }
 
@@ -182,7 +222,7 @@ impl TerminalSystem {
         // shell learns about it after the first frame.
         let grid = terminal.read().unwrap().size;
 
-        if let Some(pty) = self.pty(world) {
+        if let Some(pty) = world.read().unwrap().component::<Pty>(self.entity) {
             let _ = pty.read().unwrap().resize(grid.0, grid.1);
         }
     }
@@ -208,15 +248,21 @@ impl TerminalSystem {
 
                 self.request_redraw(world);
             }
-            WindowEvent::RedrawRequested => self.redraw(world),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 // The cursor shows again while keys are arriving, the way a
-                // terminal stops blinking when it is typed into.
-                if let Some(terminal) = self.terminal(world) {
-                    terminal.write().unwrap().wake_blink();
-                }
+                // terminal stops blinking when it is typed into. What the shell
+                // has asked of the keyboard comes out of the same borrow.
+                let modes = match self.terminal(world) {
+                    Some(terminal) => {
+                        let mut terminal = terminal.write().unwrap();
 
-                if let Some(bytes) = encode_key(&event.logical_key, self.modifiers)
+                        terminal.wake_blink();
+                        terminal.key_modes()
+                    }
+                    None => KeyModes::default(),
+                };
+
+                if let Some(bytes) = encode_key(&event.logical_key, self.modifiers, modes)
                     && let Some(pty) = self.pty(world)
                     && let Err(error) = pty.read().unwrap().write(&bytes)
                 {
@@ -273,12 +319,20 @@ impl System<UserEvent> for TerminalSystem {
         world: Arc<RwLock<World<UserEvent>>>,
     ) -> anyhow::Result<()> {
         let mut exit = false;
+        let mut draw = false;
 
         {
             let control = control.read().unwrap();
             let world = world.read().unwrap();
 
             match &control.event {
+                // A frame is drawn with the world's lock free, so the render
+                // systems it runs are free to reach back into the world. Every
+                // other event is handled with it held, as before.
+                Event::WindowEvent {
+                    event: WindowEvent::RedrawRequested,
+                    ..
+                } => draw = true,
                 Event::WindowEvent { event, .. } => exit = self.window_event(event, &world),
                 Event::UserEvent(UserEvent::Output) => {
                     self.pump(&world);
@@ -300,6 +354,10 @@ impl System<UserEvent> for TerminalSystem {
 
         if exit {
             control.write().unwrap().exit = true;
+        }
+
+        if draw {
+            self.redraw(Arc::clone(&world));
         }
 
         Ok(())

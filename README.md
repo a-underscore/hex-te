@@ -9,6 +9,12 @@ cargo test  # unit and shader tests
 
 ## Screenshots
 
+hext in motion: `fastfetch`, a listing, and then `htop` on top of it — the
+block-art logo, the colour swatch and the TUI are all drawn from the grid the
+shell wrote.
+
+![hext running fastfetch, ls and htop](docs/demo.gif)
+
 Neovim open on `src/app.rs`, running inside hext:
 
 ![Neovim open inside hext](docs/screenshot-1-neovim.png)
@@ -31,20 +37,49 @@ The colour swatch again, from a later capture:
   renders what it prints: this is a shell-connected terminal emulator, not just a
   text widget.
 - Parses the shell's byte stream with a VT state machine (`vte`) into a character
-  grid: `CR`, `LF`, `BS`, `TAB`, erasing, cursor movement, and scrolling all work.
+  grid: `CR`, `LF`, `BS`, `TAB`, erasing, cursor movement, scrolling inside the
+  margins `DECSTBM` sets, inserting and deleting characters and lines, tab stops,
+  and saving and restoring the cursor all work.
 - Paints colour the way the shell asks for it: the 16 ANSI colours, the
   256-colour cube and its greys, and 24-bit truecolour, for foreground and
   background, with bold, dim, hidden, inverse, underline and strikethrough
   resolved as each cell is drawn.
+- Draws the rest of the text decorations: a real italic and bold face out of the
+  font family, the whole `SGR 4:n` set of underlines (straight, double, curly,
+  dotted and dashed), `SGR 53` overlines, and an underline colour of its own
+  with `SGR 58` — so Neovim gets the undercurls its diagnostics use.
+- Honours the modes a full-screen program sets: `DECAWM` (`CSI ? 7`), `DECOM`
+  (`CSI ? 6`), `DECCKM` (`CSI ? 1`), `DECSCNM` (`CSI ? 5`), `DECSTBM`
+  (`CSI top;bottom r`), `IRM` (`CSI 4`) and `RIS` (`ESC c`) all change what the
+  grid does, rather than being swallowed and ignored.
+- Answers the questions a program asks the terminal: `DA` (`CSI c`) says what
+  this is, `DSR 5` says it is there and `DSR 6` reports where the cursor is — so
+  a full-screen program that measures the screen first gets an answer.
+- Draws the characters whose whole job is to touch their neighbours out of the
+  cell's own rectangle, so that they tile: the **Box Drawing** block
+  (`U+2500`–`U+257F`, including the double lines, the rounded corners and the
+  diagonals), the **Block Elements** (`U+2580`–`U+259F`, the quadrants and the
+  three shades), **Braille Patterns** (`U+2800`–`U+28FF`), the horizontal
+  **scan lines** (`U+23BA`–`U+23BD`), the first sixty **Symbols for Legacy
+  Computing** sextants (`U+1FB00`–`U+1FB3B`) and the four **Powerline**
+  separators (`U+E0B0`–`U+E0B3`). The DEC special graphics set (`ESC ( 0`) is
+  built on top of them, so a program that never leaves ASCII can still draw a box.
 - Blinks the cursor and any cell the shell marked with `SGR 5`, on a 500 ms
   clock that stops while the window is not focused and restarts on a keystroke,
   so the cursor never vanishes from under the typing.
 - Honours the cursor requests a program makes: `DECTCEM` (`CSI ? 25 h`/`l`) hides
   and shows it, and `DECSCUSR` (`CSI Ps SP q`) picks the block, bar or underline
   shape and whether it blinks — so Vim and Neovim get a block in normal mode, a
-  thin bar in insert mode and an underline in replace mode.
+  thin bar in insert mode and an underline in replace mode. A block cursor keeps
+  the character it covers readable: the block takes the cursor's colour where the
+  cell is background and the screen's own colour where the ink is, the way an
+  inverse-video cursor does. The bar and the underline are thin marks that sit
+  over the character, so they are drawn solid.
 - Forwards keystrokes to the shell: arrows, Home/End, Insert/Delete, PageUp/Down,
-  `Ctrl`+letter as control codes, and `Alt`+key as an `ESC` prefix.
+  F1–F12, `Shift`+`Tab` as back-tab, `Ctrl`+letter as control codes, `Alt`+key as
+  an `ESC` prefix, and the `CSI 1;n` modifier encoding for everything a modifier
+  is held down with — in the `ESC O` spelling for the cursor keys while `DECCKM`
+  is on.
 - The shell's own echo is the only thing drawn, so there is no double echo and
   the screen always agrees with the shell's idea of the current line.
 - Reads from the PTY happen on a dedicated thread that wakes the event loop
@@ -55,13 +90,17 @@ The colour swatch again, from a later capture:
 - Holds its own resources — the GPU, the font, the grid and the shell — as
   components of one entity in an entity-component world, and handles events in a
   system that borrows them back out of that world.
+- Finishes every frame with a `Drawable` — the screen pipeline, its bind group
+  and the uniform the shader reads — which first runs the world's render
+  pipeline, so the systems a config file registered can shape the frame that is
+  about to be drawn.
 - Lets the config file add systems of its own, so Python can shape the running
   app rather than only fill in settings.
 
-Not implemented yet: italic and a distinct bold face (those attributes
-are parsed, but the loaded font has a single face), styled or coloured
-underlines, wide (CJK) double-width cells, scrollback, the alternate screen,
-mouse reporting, and text selection.
+Not implemented yet: wide (CJK) double-width cells, scrollback, the alternate
+screen, mouse reporting and text selection, the second half of the Symbols for
+Legacy Computing block (the wedges and one-eighth blocks after `U+1FB3B`), and
+the rounded and half-height Powerline wedges (`U+E0B4` onwards).
 
 ## Configuration
 
@@ -122,6 +161,14 @@ be read instead of pasted:
 shader = open("/home/you/.config/hext/crt.wgsl").read()
 ```
 
+`fs_screen` is also where the cursor is drawn: the uniform says which cell it is
+in, what shape it has and whether it is shown at all. The reference shader draws
+a block cursor with the character under it still readable, and leaves the bar and
+the underline solid over the character. Anything that moves or spreads the ink by
+a pixel or more is worth measuring against the built-in shader before keeping it:
+a cell is only about ten by eighteen pixels, so a small amount of blur or colour
+separation is the difference between tinted text and broken text.
+
 Source that is present but not valid WGSL is a wgpu error; the built-in shader is
 parsed and validated by `cargo test`.
 
@@ -136,6 +183,7 @@ running app rather than only fill in settings:
 | `world.despawn(entity)` | Removes an entity and its components |
 | `world.entities()`, `world.entity_count()` | The active entities, and how many there are |
 | `world.add_system(fn, pipeline=0)` | Registers `fn(world)`, called once per event |
+| `world.add_system(fn, pipeline=render_pipeline)` | Registers a render function: called once per frame, while it is drawn |
 | `world.remove_system(pipeline=0)` | Drops the most recently added system |
 | `world.system_count()` | How many systems are registered |
 | `world.ambient_color`, `world.ambient_intensity` | The global lighting base values |
@@ -154,6 +202,32 @@ world.add_system(dim)
 Systems run on the event loop's thread, once per event the app dispatches. A
 system added while they run joins the next event, not the one in progress.
 
+### Render functions
+
+A system added to the `render_pipeline` pipeline runs once per frame instead, at
+the point the frame is finished: the `Drawable` in `src/drawable.rs` runs that
+pipeline and then draws the screen over the image the frame cleared. It is the
+same world and the same kind of function, so a config file can say what a frame
+does:
+
+```python
+frames = 0
+
+def draw(world):
+    global frames
+    frames += 1
+    world.ambient_intensity = (frames % 120) / 120.0
+
+world.add_system(draw, pipeline=render_pipeline)
+```
+
+A frame is not an event, so the render systems are handed `Event::AboutToWait` —
+the event that says the loop has nothing left to do — which is exactly when a
+frame is drawn. The frame is drawn with the world's lock free, so a render
+function may read and write the world the way any other system does; what it can
+reach today is the world itself (the entities and the ambient values), because
+the components the terminal draws with are not exposed to Python yet.
+
 ## Structure
 
 | File | Responsibility |
@@ -163,8 +237,10 @@ system added while they run joins the next event, not the one in progress.
 | `src/config.rs` | Writes and evaluates the Python `config.py` through `pyo3` |
 | `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
 | `src/terminal.rs` | The VT parser and character grid, key encoding, and the rasterizer that paints cells and glyphs into the screen texture |
-| `src/font.rs` | Loads the system monospace face and answers rasterization requests |
-| `src/gpu.rs` | Configures the surface and renders the texture and cursor |
+| `src/glyphs.rs` | The characters the terminal draws itself, out of the cell's rectangle: box drawing, blocks, braille, sextants and the Powerline wedges |
+| `src/font.rs` | Loads the system monospace family — regular, bold and italic — and answers rasterization requests |
+| `src/gpu.rs` | Owns the window, the surface, the device and the drawable, and drives one frame |
+| `src/drawable.rs` | The draw a frame ends with: the screen pipeline, the bind group, the uniform, and the render systems a config file can add |
 | `src/world/` | The entity-component world: the entity store, the system manager, and the ambient values |
 | `src/control.rs` | The event value a system is handed each turn, plus its `exit` flag |
 | `src/id.rs` | The `Id` entity handle |
@@ -197,7 +273,8 @@ systems registered from the config file do exactly that.
 | --- | --- |
 | `world::World` | Entity and system managers, plus the global ambient lighting values |
 | `world::{EntityManager, ComponentManager}` | Type-erased component storage behind `Arc<RwLock<C>>` |
-| `world::{System, SystemManager}` | `init`/`update` units of behaviour, added in order and run from a snapshot |
+| `world::{System, SystemManager}` | `init`/`update` units of behaviour, added in order and run from a snapshot; `update_pipeline` runs one pipeline on its own |
+| `world::{EVENT_PIPELINE, RENDER_PIPELINE}` | The pipeline the events go to, and the one a frame runs |
 | `control::Control` | The winit event plus an `exit` flag; a system sets `exit` to stop the loop |
 
 The ambient values reach a renderer as `world::AmbientUniform`: a padding-free

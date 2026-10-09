@@ -11,7 +11,9 @@
 mod app;
 mod config;
 mod control;
+mod drawable;
 mod font;
+mod glyphs;
 mod gpu;
 mod id;
 mod pty;

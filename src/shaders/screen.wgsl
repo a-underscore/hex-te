@@ -60,6 +60,11 @@ fn cursor_mask(local: vec2<f32>, cell_size: vec2<f32>, style: u32) -> f32 {
     }
 }
 
+// How bright a colour is, for telling a cell's ink from its background.
+fn luma(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
 @fragment
 fn fs_screen(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let size = cell_size() ;
@@ -74,7 +79,18 @@ fn fs_screen(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     if (screen.cursor_visible != 0u && all(cell == screen.cursor)) {
         let local = position.xy - vec2<f32>(cell) * size;
         let mask = cursor_mask(local, size, screen.cursor_style);
-        color = mix(color, screen.cursor_color.rgb, mask);
+        var cursor = screen.cursor_color.rgb;
+
+        // A block cursor keeps the character under it readable: the block takes
+        // the cursor's colour where the cell is background, and the screen's own
+        // colour where the character's ink is. The bar and the underline are
+        // thin marks drawn over the character, so they stay solid.
+        if (screen.cursor_style == CURSOR_BLOCK) {
+            let ink = clamp((luma(color) - luma(screen.background.rgb)) * 4.0, 0.0, 1.0);
+            cursor = mix(cursor, screen.background.rgb, ink);
+        }
+
+        color = mix(color, cursor, mask);
     }
 
     return vec4<f32>(color, 1.0);
