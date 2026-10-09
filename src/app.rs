@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
 
 use nalgebra::Vector3;
 
@@ -9,28 +8,19 @@ use crate::world::{EVENT_PIPELINE, System, World};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, Event, WindowEvent},
+    event::{ElementState, Event, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy},
-    keyboard::ModifiersState,
+    keyboard::{Key, ModifiersState},
     window::{Window, WindowId},
 };
 
 use crate::WINDOW_TITLE;
+use crate::clipboard::Clipboard;
 use crate::config::Config;
-use crate::drawable::Pictures;
 use crate::font::Font;
 use crate::gpu::Gpu;
 use crate::pty::Pty;
 use crate::terminal::{KeyModes, Terminal, encode_key};
-
-/// The sooner of two deadlines, either of which may be missing: the app sleeps
-/// until whichever of its clocks is due first.
-fn sooner(first: Option<Instant>, second: Option<Instant>) -> Option<Instant> {
-    match (first, second) {
-        (Some(first), Some(second)) => Some(first.min(second)),
-        (deadline, None) | (None, deadline) => deadline,
-    }
-}
 
 /// Wakes the event loop back up when the shell has something to say.
 #[derive(Debug)]
@@ -52,9 +42,6 @@ pub(crate) enum UserEvent {
 pub(crate) struct App {
     world: Arc<RwLock<World<UserEvent>>>,
     entity: Id,
-    /// Frames a second the config asked the app to draw, for a shader that
-    /// moves. Zero means the loop only draws when something changed.
-    frame_rate: f32,
 }
 
 impl App {
@@ -70,6 +57,7 @@ impl App {
 
             // Register the managers up front so the world knows about the app's
             // component types before the first `attach`.
+            em.register::<Clipboard>();
             em.register::<Config>();
             em.register::<Gpu>();
             em.register::<Font>();
@@ -83,7 +71,6 @@ impl App {
         // world, and a `config.py` that touched it would deadlock against a
         // guard held here.
         let config = Config::load(Arc::clone(&world));
-        let frame_rate = config.frame_rate;
 
         world.read().unwrap().attach_value(entity, config);
 
@@ -94,11 +81,7 @@ impl App {
             .unwrap()
             .add_system(0, TerminalSystem::new(entity, proxy));
 
-        Ok(Self {
-            world,
-            entity,
-            frame_rate,
-        })
+        Ok(Self { world, entity })
     }
 
     /// Runs one event through the world's systems, stopping the loop if a
@@ -143,9 +126,11 @@ struct TerminalSystem {
     /// Output the reader thread collected that the grid has not parsed yet.
     pending: Arc<Mutex<Vec<u8>>>,
     modifiers: ModifiersState,
-    /// Frames a second the config asked the app to draw: a shader that reads
-    /// the clock needs a frame to move in, whatever the blink phase is doing.
-    frame_rate: f32,
+    /// Where the pointer is, in physical pixels, so that a drag can be turned
+    /// into a cell without waiting for the next move.
+    pointer: (f64, f64),
+    /// Whether the left button is down, which is what makes a move a drag.
+    dragging: bool,
     /// Used to wake the event loop up when the shell writes something.
     proxy: EventLoopProxy<UserEvent>,
 }
@@ -156,7 +141,8 @@ impl TerminalSystem {
             entity,
             pending: Arc::new(Mutex::new(Vec::new())),
             modifiers: ModifiersState::empty(),
-            frame_rate: 0.0,
+            pointer: (0.0, 0.0),
+            dragging: false,
             proxy,
         }
     }
@@ -171,6 +157,35 @@ impl TerminalSystem {
 
     fn pty(&self, world: &World<UserEvent>) -> Option<Arc<RwLock<Pty>>> {
         world.component::<Pty>(self.entity)
+    }
+
+    /// The cell the pointer is over, laid out the way the rasterizer lays the
+    /// grid out, or nothing while there is no window to measure against.
+    fn cell_under_pointer(&self, world: &World<UserEvent>) -> Option<(usize, usize)> {
+        let surface = self.gpu(world)?.read().unwrap().size();
+        let terminal = self.terminal(world)?;
+
+        Some(terminal.read().unwrap().cell_at(self.pointer, surface))
+    }
+
+    /// Puts the selection on the clipboard. `Ctrl+Shift+C` is the shortcut every
+    /// terminal uses for that, which is also why the key does not go on to the
+    /// shell.
+    fn copy_selection(&self, world: &World<UserEvent>) {
+        let Some(text) = self
+            .terminal(world)
+            .and_then(|terminal| terminal.read().unwrap().selection_text())
+        else {
+            return;
+        };
+
+        let Some(clipboard) = world.component::<Clipboard>(self.entity) else {
+            return;
+        };
+
+        if let Err(error) = clipboard.read().unwrap().copy(&text) {
+            eprintln!("{WINDOW_TITLE}: {error:#}");
+        }
     }
 
     fn request_redraw(&self, world: &World<UserEvent>) {
@@ -271,6 +286,52 @@ impl TerminalSystem {
 
                 self.request_redraw(world);
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer = (position.x, position.y);
+
+                // A move is only a drag while the button is down; without it
+                // the pointer is just being remembered for the next one.
+                if self.dragging
+                    && let Some(cell) = self.cell_under_pointer(world)
+                {
+                    if let Some(terminal) = self.terminal(world) {
+                        terminal.write().unwrap().extend_selection(cell);
+                    }
+
+                    self.request_redraw(world);
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // Pressing starts a new selection at the cell under the
+                // pointer, however short it turns out to be; releasing just
+                // ends the drag, so what was selected stays selected.
+                if *state == ElementState::Pressed {
+                    self.dragging = true;
+
+                    if let Some(cell) = self.cell_under_pointer(world)
+                        && let Some(terminal) = self.terminal(world)
+                    {
+                        terminal.write().unwrap().start_selection(cell);
+                    }
+                } else {
+                    self.dragging = false;
+                }
+
+                self.request_redraw(world);
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && self.modifiers.control_key()
+                    && self.modifiers.shift_key()
+                    && matches!(&event.logical_key, Key::Character(key)
+                        if key.eq_ignore_ascii_case("c")) =>
+            {
+                self.copy_selection(world);
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 // The cursor shows again while keys are arriving, the way a
                 // terminal stops blinking when it is typed into. What the shell
@@ -315,10 +376,6 @@ impl System<UserEvent> for TerminalSystem {
         let font = world.attach_value(self.entity, Font::load(config.font_size)?);
         world.attach_value(self.entity, Terminal::new(font, config.background));
 
-        // The rate the frame clock runs at, kept here so that a wake-up does
-        // not have to read the config back out of the world.
-        self.frame_rate = config.frame_rate;
-
         // Reads from the pty block, so they happen on the reader thread and the
         // result is handed to the event loop as a user event.
         let sink = Arc::clone(&self.pending);
@@ -336,6 +393,15 @@ impl System<UserEvent> for TerminalSystem {
             }
         })?;
         world.attach_value(self.entity, pty);
+
+        // A clipboard the session will not give up is not worth refusing to
+        // start over: selecting still works, and only a copy is missing.
+        match Clipboard::new() {
+            Ok(clipboard) => {
+                world.attach_value(self.entity, clipboard);
+            }
+            Err(error) => eprintln!("{WINDOW_TITLE}: {error:#}"),
+        }
 
         Ok(())
     }
@@ -366,15 +432,11 @@ impl System<UserEvent> for TerminalSystem {
                     self.request_redraw(&world);
                 }
                 Event::UserEvent(UserEvent::Blink) => {
-                    // A clock-driven frame is drawn whatever the phase is doing;
-                    // otherwise only a phase that really moved is worth one.
-                    // This event is dispatched on every wake-up, deadlines
-                    // included.
-                    let moved = self
-                        .terminal(&world)
-                        .is_some_and(|terminal| terminal.write().unwrap().tick_blink());
-
-                    if self.frame_rate > 0.0 || moved {
+                    // Only redraw when the phase really moved: this event is
+                    // dispatched on every wake-up, deadlines included.
+                    if let Some(terminal) = self.terminal(&world)
+                        && terminal.write().unwrap().tick_blink()
+                    {
                         self.request_redraw(&world);
                     }
                 }
@@ -421,10 +483,7 @@ impl ApplicationHandler<UserEvent> for App {
             config.background,
             config.cursor_color,
             config.shader.as_deref(),
-            Pictures {
-                background: config.background_image.as_deref(),
-                foreground: config.foreground_image.as_deref(),
-            },
+            config.background_image.as_deref(),
         )) {
             Ok(gpu) => gpu,
             Err(error) => {
@@ -456,16 +515,13 @@ impl ApplicationHandler<UserEvent> for App {
         // this is the one event the app makes up itself.
         self.dispatch(event_loop, Event::UserEvent(UserEvent::Blink));
 
-        // Then sleep until the clock's next flip — and until the next frame,
-        // when the config asked for a rate — so a quiet shell costs nothing at
-        // all while nothing on screen is moving.
-        let blink = self
+        // Then sleep until the clock's next flip, so a quiet shell costs
+        // nothing at all. `Wait` is enough once nothing on screen blinks.
+        let deadline = self
             .component::<Terminal>()
             .and_then(|terminal| terminal.read().unwrap().next_blink());
-        let frame = (self.frame_rate > 0.0)
-            .then(|| Instant::now() + Duration::from_secs_f32(self.frame_rate.recip()));
 
-        event_loop.set_control_flow(match sooner(blink, frame) {
+        event_loop.set_control_flow(match deadline {
             Some(deadline) => ControlFlow::WaitUntil(deadline),
             None => ControlFlow::Wait,
         });

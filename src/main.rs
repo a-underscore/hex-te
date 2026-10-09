@@ -9,6 +9,7 @@
 //! without a library target in between.
 
 mod app;
+mod clipboard;
 mod config;
 mod control;
 mod drawable;

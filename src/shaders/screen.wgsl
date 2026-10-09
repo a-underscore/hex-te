@@ -11,9 +11,7 @@ struct Screen {
     cursor_visible: u32,
     cursor_style: u32,
     cursor_size: vec2<f32>,
-    // Seconds since the app started, for a shader that wants to move.
-    time: f32,
-    padding: u32,
+    padding: vec2<u32>,
 }
 
 @group(0) @binding(0) var<uniform> screen: Screen;
@@ -23,10 +21,6 @@ struct Screen {
 // pixel of `Screen::background` when the config asked for no picture, so the
 // composite below is the same thing either way.
 @group(0) @binding(3) var background_tex: texture_2d<f32>;
-// The picture over everything, stretched the same way: an overlay like a
-// shadow mask, a glare or a grille. It is a transparent pixel when the config
-// asked for none, so the composite below leaves the image alone.
-@group(0) @binding(4) var foreground_tex: texture_2d<f32>;
 
 @vertex
 fn vs_screen(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
@@ -110,11 +104,6 @@ fn fs_screen(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 
         color = mix(color, cursor, mask);
     }
-
-    // Whatever the config put over the screen goes over all of it, cursor
-    // included: the overlay is the glass in front of the tube.
-    let front = textureSample(foreground_tex, screen_sampler, uv);
-    color = mix(color, front.rgb, front.a);
 
     return vec4<f32>(color, 1.0);
 }

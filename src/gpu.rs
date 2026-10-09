@@ -1,10 +1,11 @@
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use anyhow::anyhow;
 use winit::window::Window;
 
 use crate::WINDOW_TITLE;
-use crate::drawable::{Drawable, Pictures};
+use crate::drawable::Drawable;
 use crate::terminal::Terminal;
 use crate::world::{SystemManager, World};
 
@@ -29,13 +30,13 @@ impl Gpu {
     ///
     /// `background` and `cursor_color` come from the config file, as `r, g, b, a`,
     /// `shader` is the WGSL source the config wrote, when it wrote one, and
-    /// `pictures` are the pictures it named, when it named any.
+    /// `background_image` is the picture it wants behind the grid.
     pub(crate) async fn new(
         window: Arc<Window>,
         background: [f32; 4],
         cursor_color: [f32; 4],
         shader: Option<&str>,
-        pictures: Pictures<'_>,
+        background_image: Option<&Path>,
     ) -> anyhow::Result<Self> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -73,7 +74,7 @@ impl Gpu {
             background,
             cursor_color,
             shader,
-            pictures,
+            background_image,
         );
         drawable.set_resolution([config.width as f32, config.height as f32]);
 
@@ -93,6 +94,14 @@ impl Gpu {
 
     pub(crate) fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    /// The size of the window in physical pixels: what the grid is laid out in,
+    /// and so what a pointer position is measured against.
+    pub(crate) fn size(&self) -> (u32, u32) {
+        let size = self.window.inner_size();
+
+        (size.width, size.height)
     }
 
     pub(crate) fn request_redraw(&self) {

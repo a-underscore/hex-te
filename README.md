@@ -75,6 +75,13 @@ The colour swatch again, from a later capture:
   cell is background and the screen's own colour where the ink is, the way an
   inverse-video cursor does. The bar and the underline are thin marks that sit
   over the character, so they are drawn solid.
+- Selects text with the mouse: dragging the left button over the grid marks the
+  cells it sweeps, in reading order, and draws them in inverse video — a band of
+  the foreground colour with the text inside it in the background colour, which
+  is what reads over a background picture too. `Ctrl+Shift+C` copies it to the
+  system clipboard, with each line cut at its last non-blank cell, and that key
+  does not go on to the shell. A click anywhere starts a new selection, and
+  resizing the window gives it up, because the text has moved.
 - Forwards keystrokes to the shell: arrows, Home/End, Insert/Delete, PageUp/Down,
   F1–F12, `Shift`+`Tab` as back-tab, `Ctrl`+letter as control codes, `Alt`+key as
   an `ESC` prefix, and the `CSI 1;n` modifier encoding for everything a modifier
@@ -100,15 +107,11 @@ The colour swatch again, from a later capture:
   each pixel the grid covers in its alpha, so a picture named by
   `background_image` shows through every cell a program left unpainted, and a
   cell that asked for a colour of its own covers it.
-- Puts a second picture over all of it, `foreground_image`, for the glass in
-  front of the tube — a shadow mask, a grille, a glare — and hands the shader a
-  clock, so an overlay can buzz, flicker or drift. Frames are drawn on demand by
-  default and at `frame_rate` a second when the config asks for them.
 
 Not implemented yet: wide (CJK) double-width cells, scrollback, the alternate
-screen, mouse reporting and text selection, the second half of the Symbols for
-Legacy Computing block (the wedges and one-eighth blocks after `U+1FB3B`), and
-the rounded and half-height Powerline wedges (`U+E0B4` onwards).
+screen, mouse reporting, and the second half of the Symbols for Legacy Computing
+block (the wedges and one-eighth blocks after `U+1FB3B`), and the rounded and
+half-height Powerline wedges (`U+E0B4` onwards).
 
 ## Configuration
 
@@ -129,12 +132,9 @@ These are the names the file documents:
 | `background`, `cursor_color` | Colours, as `(r, g, b)` floats in `0.0..=1.0` |
 | `shader` | The WGSL the screen is drawn with, as source; `None` keeps the built-in one |
 | `background_image` | A PNG or JPEG to draw behind the grid; `None` keeps the `background` colour |
-| `foreground_image` | A PNG or JPEG to draw over everything; `None` is no overlay |
-| `frame_rate` | Frames a second to draw; `0.0` draws only when something changed |
 
-`shader`, `background_image`, `foreground_image` and `frame_rate` are the
-settings that are applied today: the app builds the screen pipeline from that
-source, loads those pictures and runs its clock at that rate, so all four are
+`shader` and `background_image` are the settings that are applied today: the app
+builds the screen pipeline from that source and loads that picture, so both are
 part of `config.py` and changing them is a restart rather than a rebuild. The
 rest of the names above are documented but not read back yet. The file is read
 once, when the app starts, so restart it to pick up an edit; a window manager is
@@ -156,29 +156,6 @@ that asked for a colour of its own — stay opaque on top of the picture.
 A picture that cannot be read is reported and the `background` colour used
 instead, the way a config file that cannot be evaluated keeps the defaults.
 
-### A picture over the grid
-
-`foreground_image` is the other side of the same idea: a picture stretched over
-the window and drawn over *everything*, text and cursor included. Where it is
-transparent the screen shows through, so it is a PNG with an alpha channel — a
-shadow mask, a grille, a sheet of glare, a scratch on the glass.
-
-Because a shader can read `screen.time`, an overlay does not have to be still:
-it can buzz, flicker or drift, and so can the effect a custom shader applies to
-the image itself. The screen is only drawn when something changes, though — a
-keypress, shell output, or a blink — so a moving shader needs frames to move in:
-
-```python
-frame_rate = 60.0
-```
-
-`frame_rate` is the one setting that costs something when nothing else is
-happening, so it defaults to `0.0`, which draws on demand only. Each tick is a
-whole frame, and at a large window most of that is the rasterizer: 30 is cheaper
-and still reads as movement. Times are in seconds since the app started, so a
-shader can also stay slow and quiet — a flicker at 47 rad/s and a sub-pixel
-jitter is what the CRT shader below does.
-
 ### Custom shaders
 
 `shader` holds WGSL source, so the whole look of the terminal can be changed from
@@ -199,11 +176,10 @@ app does not know which ones it will find:
 
 | Binding | What it is |
 | --- | --- |
-| `@group(0) @binding(0)` | A `Screen` uniform: `background`, `cursor_color`, `resolution`, `grid`, `cursor`, `cursor_visible`, `cursor_style`, `cursor_size`, `time` — seconds since the app started |
+| `@group(0) @binding(0)` | A `Screen` uniform: `background`, `cursor_color`, `resolution`, `grid`, `cursor`, `cursor_visible`, `cursor_style`, `cursor_size` |
 | `@group(0) @binding(1)` | The screen texture: the grid as ink, in sRGB bytes, with the alpha saying how much of each pixel a cell covers |
 | `@group(0) @binding(2)` | A sampler for that texture |
 | `@group(0) @binding(3)` | The `background_image` picture, stretched over the window — or one pixel of `background` when the config named none |
-| `@group(0) @binding(4)` | The `foreground_image` picture, stretched the same way — or one transparent pixel when the config named none |
 
 `vs_screen` draws one fullscreen triangle from `@builtin(vertex_index)` and
 `fs_screen` returns a colour for `@builtin(position)`. `src/shaders/screen.wgsl`
@@ -227,14 +203,7 @@ var color = mix(backdrop, ink.rgb, ink.a);
 Effect shaders spread that line out — the aberration in the CRT config shifts the
 texture sideways per channel, so the alpha comes from the unshifted sample and the
 colour from the shifted ones. Anything that ignores the alpha shows the plain
-`background` colour behind the text whatever `background_image` says. The overlay
-is the last thing the reference shader does, so a shader that draws one puts it
-after the cursor and after whatever else it did:
-
-```wgsl
-let glass = textureSample(foreground_tex, screen_sampler, uv);
-color = mix(color, glass.rgb, glass.a);
-```
+`background` colour behind the text whatever `background_image` says.
 
 `fs_screen` is also where the cursor is drawn: the uniform says which cell it is
 in, what shape it has and whether it is shown at all. The reference shader draws
@@ -311,6 +280,7 @@ the components the terminal draws with are not exposed to Python yet.
 | `src/app.rs` | The winit glue: turns events into `Control` values and runs them through the systems |
 | `src/config.rs` | Writes and evaluates the Python `config.py` through `pyo3` |
 | `src/pty.rs` | Allocates the PTY, spawns `$SHELL`, and pumps its output from a reader thread |
+| `src/clipboard.rs` | The system clipboard a selection is copied to, held for the life of the app |
 | `src/terminal.rs` | The VT parser and character grid, key encoding, and the rasterizer that paints cells and glyphs into the screen texture, as ink on nothing |
 | `src/glyphs.rs` | The characters the terminal draws itself, out of the cell's rectangle: box drawing, blocks, braille, sextants and the Powerline wedges |
 | `src/font.rs` | Loads the system monospace family — regular, bold and italic — and answers rasterization requests |

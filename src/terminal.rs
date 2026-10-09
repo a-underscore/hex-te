@@ -22,6 +22,9 @@ pub(crate) struct Terminal {
     pub size: (usize, usize),
     pub last_texture_size: wgpu::Extent3d,
     pub texture: Option<wgpu::Texture>,
+    /// The cells the mouse has dragged over, if any. It says what to paint
+    /// inverted and what a copy would take.
+    selection: Option<Selection>,
     /// A handle to the font component rather than a copy of it: the grid asks it
     /// for advances and glyph bitmaps, and nothing else owns those settings.
     font: Arc<RwLock<Font>>,
@@ -55,6 +58,7 @@ impl Terminal {
                 depth_or_array_layers: 1,
             },
             texture: None,
+            selection: None,
             font,
             palette: Palette::new(background),
             screen: Screen::default(),
@@ -199,13 +203,89 @@ impl Terminal {
             font.cell()
         };
 
-        self.cursor_size = (cell_width, cell_height);
-        self.size = (
+        let size = (
             (width as f32 / cell_width).floor().max(1.0) as usize,
             (height as f32 / cell_height).floor().max(1.0) as usize,
         );
+
+        // A grid that really changed shape has moved its text about, so a
+        // selection of cells is no longer a selection of the same words. This
+        // runs for every frame, so the comparison is what keeps a selection
+        // through the redraws the drag itself causes.
+        if self.size != size {
+            self.selection = None;
+        }
+
+        self.cursor_size = (cell_width, cell_height);
+        self.size = size;
         self.screen.resize(self.size.0, self.size.1);
         self.update_cursor_state();
+    }
+
+    /// Starts a selection at a cell, forgetting whichever one was there.
+    pub(crate) fn start_selection(&mut self, cell: (usize, usize)) {
+        self.selection = Some(Selection {
+            anchor: cell,
+            focus: cell,
+        });
+    }
+
+    /// Drags the far end of the selection to another cell.
+    pub(crate) fn extend_selection(&mut self, cell: (usize, usize)) {
+        if let Some(selection) = self.selection.as_mut() {
+            selection.focus = cell;
+        }
+    }
+
+    /// What the selection covers, as text: every row it touches, each cut at
+    /// the last cell that is not blank, joined with newlines. The padding the
+    /// shell left at the end of a line is not part of what was selected.
+    pub(crate) fn selection_text(&self) -> Option<String> {
+        let ((first_col, first_row), (last_col, last_row)) = self.selection?.range();
+        let mut lines = Vec::new();
+
+        for row in first_row..=last_row.min(self.size.1.saturating_sub(1)) {
+            let start = if row == first_row { first_col } else { 0 };
+            let end = if row == last_row {
+                last_col
+            } else {
+                self.size.0.saturating_sub(1)
+            };
+            let text: String = (start..=end.min(self.size.0.saturating_sub(1)))
+                .map(|col| self.screen.cell(row, col).ch)
+                .collect();
+
+            lines.push(text.trim_end().to_owned());
+        }
+
+        // A selection of nothing but padding is nothing to copy, and copying an
+        // empty string would only throw away what was on the clipboard.
+        let text = lines.join("\n");
+
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// The cell a point of the window falls in.
+    ///
+    /// The rasterizer lays the grid out by rounding each cell boundary once and
+    /// sharing it with the cell next to it; this walks those same boundaries, so
+    /// a click lands on the cell it looks like it is on. `window` is the surface
+    /// in physical pixels, which is also what the point is in.
+    pub(crate) fn cell_at(&self, point: (f64, f64), window: (u32, u32)) -> (usize, usize) {
+        let (cols, rows) = self.size;
+        let (cell_width, cell_height) = self.cursor_size;
+
+        let axis = |position: f64, cells: usize, cell: f32, extent: u32| -> usize {
+            (0..cells)
+                .rev()
+                .find(|&index| f64::from(boundary(index, cells, cell, extent as usize)) <= position)
+                .unwrap_or(0)
+        };
+
+        (
+            axis(point.0, cols, cell_width, window.0),
+            axis(point.1, rows, cell_height, window.1),
+        )
     }
 
     /// Paints the whole grid into an RGBA buffer, in the sRGB bytes the screen
@@ -252,13 +332,6 @@ impl Terminal {
         // background as a line through every coloured region. The last edge is
         // the texture's own edge, so the grid reaches the window and no strip of
         // background is left along the right or bottom side.
-        let boundary = |index: usize, cells: usize, cell: f32, extent: usize| -> i32 {
-            if index == cells {
-                extent as i32
-            } else {
-                ((index as f32 * cell).round() as i32).min(extent as i32)
-            }
-        };
 
         for row in 0..rows {
             let y = boundary(row, rows, cell_height, h);
@@ -266,7 +339,11 @@ impl Terminal {
 
             for col in 0..cols {
                 let cell = self.screen.cell(row, col);
-                let paint = self.palette.paint(cell, reverse);
+                let selected = self
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.contains(row, col));
+                let paint = self.palette.paint(cell, reverse, selected);
                 let x = boundary(col, cols, cell_width, w);
                 let rect = Rect {
                     x,
@@ -398,6 +475,58 @@ impl Terminal {
         }
 
         buffer
+    }
+}
+
+/// Where a cell starts, in pixels: rounded once and shared with the cell next
+/// to it, so that the two always meet, and the last one reaching the edge of
+/// the window rather than falling a pixel short of it.
+fn boundary(index: usize, cells: usize, cell: f32, extent: usize) -> i32 {
+    if index >= cells {
+        extent as i32
+    } else {
+        ((index as f32 * cell).round() as i32).min(extent as i32)
+    }
+}
+
+/// The cells a drag has swept over, as the corner it started at and the one the
+/// mouse is at now. Either can come first in reading order, which is why they
+/// are kept as they were given rather than sorted as they arrive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Selection {
+    anchor: (usize, usize),
+    focus: (usize, usize),
+}
+
+impl Selection {
+    /// The two corners in reading order: the first is never after the second.
+    fn range(self) -> ((usize, usize), (usize, usize)) {
+        if (self.anchor.1, self.anchor.0) <= (self.focus.1, self.focus.0) {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+
+    /// Whether a cell is in the band, which runs the way text does: from the
+    /// first corner to the end of its row, whole rows in between, and from the
+    /// start of the last row to the second corner.
+    fn contains(self, row: usize, col: usize) -> bool {
+        let ((first_col, first_row), (last_col, last_row)) = self.range();
+
+        if row < first_row || row > last_row {
+            return false;
+        }
+
+        if row == first_row && col < first_col {
+            return false;
+        }
+
+        if row == last_row && col > last_col {
+            return false;
+        }
+
+        true
     }
 }
 
@@ -678,7 +807,7 @@ impl Palette {
     ///
     /// `reverse` is `DECSCNM`, the mode that draws the whole screen inverted:
     /// it swaps the two colours of every cell, which is what the mode means.
-    fn paint(&self, cell: Cell, reverse: bool) -> Paint {
+    fn paint(&self, cell: Cell, reverse: bool, selected: bool) -> Paint {
         let mut fg = self.resolve(cell.fg, self.foreground);
         let mut bg = self.resolve(cell.bg, self.background);
 
@@ -706,6 +835,14 @@ impl Palette {
             std::mem::swap(&mut fg, &mut bg);
         }
 
+        // A selected cell is drawn in inverse video, the way a terminal has
+        // always shown a selection: the band is the foreground colour and the
+        // text inside it is the background one, which reads the same over a
+        // picture as over the plain background.
+        if selected {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+
         // An underline that was not given a colour of its own follows the text
         // through all of that, so it stays visible when the cell is hidden or
         // inverted.
@@ -716,11 +853,13 @@ impl Palette {
 
         // A cell that asked for a background of its own covers whatever is
         // behind the grid for its whole rectangle, and so does one that has
-        // been inverted or a screen that is drawn upside down. Every other cell
-        // leaves the bare background showing, which is what lets a picture
-        // through.
-        let opaque =
-            !matches!(cell.bg, Color::Default) || cell.attrs.contains(Attrs::INVERSE) || reverse;
+        // been inverted, a screen that is drawn upside down, or a cell inside
+        // the selection. Every other cell leaves the bare background showing,
+        // which is what lets a picture through.
+        let opaque = !matches!(cell.bg, Color::Default)
+            || cell.attrs.contains(Attrs::INVERSE)
+            || reverse
+            || selected;
 
         Paint {
             fg,
@@ -2290,6 +2429,131 @@ mod tests {
 
         assert_eq!(&pixels[0..3], &ANSI[1]);
         assert_eq!(pixels[3], 255, "a background of its own covers the picture");
+    }
+
+    #[test]
+    fn a_selection_is_the_text_between_its_two_corners() {
+        let mut terminal = terminal();
+        terminal.update_grid_size(256, 128);
+        terminal.feed(b"one\r\ntwo\r\nthree");
+
+        // From the last cell of the first row to the third cell of the last.
+        terminal.start_selection((2, 0));
+        terminal.extend_selection((2, 2));
+
+        assert_eq!(terminal.selection_text().as_deref(), Some("e\ntwo\nthr"));
+    }
+
+    #[test]
+    fn a_selection_reads_the_same_either_way_round() {
+        let mut terminal = terminal();
+        terminal.update_grid_size(256, 128);
+        terminal.feed(b"one\r\ntwo");
+
+        terminal.start_selection((2, 1));
+        terminal.extend_selection((1, 0));
+        let backwards = terminal.selection_text();
+
+        terminal.start_selection((1, 0));
+        terminal.extend_selection((2, 1));
+
+        assert_eq!(backwards, terminal.selection_text());
+    }
+
+    #[test]
+    fn an_empty_selection_is_no_text() {
+        let mut terminal = terminal();
+        terminal.update_grid_size(256, 128);
+        terminal.feed(b"one");
+
+        terminal.start_selection((1, 1));
+
+        assert_eq!(
+            terminal.selection_text(),
+            None,
+            "a corner on its own selects the padding, which is nothing"
+        );
+    }
+
+    #[test]
+    fn a_selected_cell_is_drawn_in_inverse_video() {
+        let mut terminal = terminal();
+        terminal.update_grid_size(64, 32);
+        terminal.feed(b"\x1b[41m \x1b[0m ");
+        terminal.start_selection((1, 0));
+
+        let pixels = terminal.rasterize(64, 32);
+        // The second cell is empty and unpainted: selected, it becomes a block
+        // of the foreground colour rather than a transparent cell.
+        let cell_width = terminal.cursor_size.0 as usize;
+        let (x, y) = (cell_width + 2, 2);
+        let pixel = &pixels[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4];
+
+        assert_eq!(pixel, [0xdc, 0xdf, 0xe4, 255], "the pen's foreground");
+    }
+
+    #[test]
+    fn a_click_lands_on_the_cell_under_it() {
+        let mut terminal = terminal();
+        let (w, h) = (640, 320);
+        terminal.update_grid_size(w, h);
+
+        let (cols, rows) = terminal.size;
+        let (cell_width, cell_height) = terminal.cursor_size;
+        let inside = |index: usize, cell: f32| index as f64 * f64::from(cell) + 1.0;
+
+        assert_eq!(terminal.cell_at((1.0, 1.0), (w as u32, h as u32)), (0, 0));
+        assert_eq!(
+            terminal.cell_at(
+                (inside(3, cell_width), inside(2, cell_height)),
+                (w as u32, h as u32)
+            ),
+            (3, 2)
+        );
+        // A point past the last cell, or outside the window altogether, clamps
+        // to the edge rather than running off the grid.
+        assert_eq!(
+            terminal
+                .cell_at((w as f64 + 50.0, 1.0), (w as u32, h as u32))
+                .0,
+            cols - 1
+        );
+        assert_eq!(
+            terminal
+                .cell_at((1.0, h as f64 + 50.0), (w as u32, h as u32))
+                .1,
+            rows - 1
+        );
+    }
+
+    #[test]
+    fn a_new_grid_forgets_the_selection() {
+        let mut terminal = terminal();
+        terminal.update_grid_size(256, 128);
+        terminal.feed(b"one two");
+        terminal.start_selection((0, 0));
+        terminal.extend_selection((6, 0));
+
+        terminal.update_grid_size(128, 128);
+
+        assert_eq!(terminal.selection_text(), None);
+    }
+
+    #[test]
+    fn a_redraw_keeps_the_selection() {
+        let mut terminal = terminal();
+        let (w, h) = (256, 128);
+        terminal.update_grid_size(w, h);
+        terminal.feed(b"one two");
+        terminal.start_selection((0, 0));
+        terminal.extend_selection((6, 0));
+
+        // The same window every frame, which is what a redraw does: a selection
+        // that did not survive that would never be seen at all.
+        terminal.update_grid_size(w, h);
+        terminal.update_grid_size(w, h);
+
+        assert_eq!(terminal.selection_text().as_deref(), Some("one two"));
     }
 
     #[test]
