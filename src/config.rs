@@ -37,6 +37,12 @@ pub(crate) struct Config {
     /// A picture to draw behind the grid. `None` draws the plain background
     /// colour, which is what the shader does when no picture is there at all.
     pub background_image: Option<PathBuf>,
+    /// A picture to draw over everything, transparent where the image below
+    /// should show. `None` is no overlay at all.
+    pub foreground_image: Option<PathBuf>,
+    /// Frames a second the app draws, so that a shader reading the clock has
+    /// something to move in. `0.0` draws only when something changed.
+    pub frame_rate: f32,
 }
 
 impl Default for Config {
@@ -49,6 +55,8 @@ impl Default for Config {
             cursor_color: [0.16, 0.72, 0.72, 1.0],
             shader: None,
             background_image: None,
+            foreground_image: None,
+            frame_rate: 0.0,
         }
     }
 }
@@ -60,9 +68,9 @@ const DEFAULT_CONFIG: &str = r#"# hext configuration.
 # This file is Python: the host evaluates it with an embedded interpreter, so
 # anything that produces the right value works. Every name is optional, and one
 # that is missing or of the wrong type falls back to the default shown here.
-# `shader` and `background_image` are the settings the app reads back today; the
-# others are written out for the day they are wired up, so changing them has no
-# effect yet.
+# `shader`, `background_image`, `foreground_image` and `frame_rate` are the
+# settings the app reads back today; the others are written out for the day they
+# are wired up, so changing them has no effect yet.
 
 # Glyphs are rasterized at this size, in logical pixels.
 font_size = 16.0
@@ -98,6 +106,28 @@ shader = None
 # `None` shows the plain `background` colour instead, and a picture that cannot
 # be read is reported and the colour used.
 background_image = None
+
+# A picture to draw over everything, stretched the same way: the glass in front
+# of the tube. Where the picture is transparent, the screen shows through, so a
+# shadow mask, a grille, a sheet of glare or a scratch is drawn as a PNG with an
+# alpha channel:
+#
+#     foreground_image = "/home/you/pictures/mask.png"
+#
+# An overlay can also move, since the shader reads `screen.time` — seconds since
+# the app started — for a buzz, a flicker or a slow drift. `None` is no overlay.
+foreground_image = None
+
+# Frames a second the app draws. The loop otherwise sleeps until something
+# changes, so a shader that moves — a buzz, a flicker, a slow scan — needs a
+# rate to move at. 0.0 draws only when there is something to draw.
+#
+#     frame_rate = 60.0
+#
+# Every tick is a frame, and it costs what a frame costs: at a large window the
+# rasterizer is the expensive part, and 30.0 is cheaper and still reads as
+# movement.
+frame_rate = 0.0
 
 # The app's entity-component world is bound here as `world`: the same object the
 # engine goes on using, so this file can seed it and set it up. It holds the
@@ -215,6 +245,8 @@ impl Config {
 
             config.shader = setting_text(&globals, "shader");
             config.background_image = setting_path(&globals, "background_image");
+            config.foreground_image = setting_path(&globals, "foreground_image");
+            config.frame_rate = setting_number(&globals, "frame_rate");
 
             Ok(())
         })?;
@@ -232,6 +264,29 @@ fn setting_path(globals: &Bound<'_, PyDict>, name: &str) -> Option<PathBuf> {
     setting_text(globals, name)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
+}
+
+/// Reads a setting that holds a number, keeping it only if it is a real one:
+/// a rate of zero or below, or a value that is not a number at all, is the same
+/// as leaving the setting out.
+fn setting_number(globals: &Bound<'_, PyDict>, name: &str) -> f32 {
+    match globals.get_item(name) {
+        Ok(Some(value)) if !value.is_none() => match value.extract::<f32>() {
+            Ok(number) if number.is_finite() && number > 0.0 => number,
+            Ok(_) => 0.0,
+            Err(error) => {
+                eprintln!("{WINDOW_TITLE}: {name}: {error}");
+
+                0.0
+            }
+        },
+        Ok(_) => 0.0,
+        Err(error) => {
+            eprintln!("{WINDOW_TITLE}: {name}: {error}");
+
+            0.0
+        }
+    }
 }
 
 /// Reads a setting that holds text.
@@ -555,6 +610,44 @@ mod tests {
         assert_eq!(
             config("bad-background", "background_image = 42\n").background_image,
             None
+        );
+    }
+
+    #[test]
+    fn the_foreground_image_setting_is_the_path_the_config_wrote() {
+        let overlay = config("foreground", "foreground_image = '/tmp/mask.png'\n");
+
+        assert_eq!(
+            overlay.foreground_image.as_deref(),
+            Some(std::path::Path::new("/tmp/mask.png"))
+        );
+        assert_eq!(
+            config("no-foreground", "font_size = 30.0\n").foreground_image,
+            None
+        );
+        assert_eq!(
+            config("none-foreground", "foreground_image = None\n").foreground_image,
+            None
+        );
+    }
+
+    #[test]
+    fn the_frame_rate_setting_is_the_rate_the_config_wrote() {
+        assert_eq!(config("frames", "frame_rate = 30\n").frame_rate, 30.0);
+        assert_eq!(
+            config("no-frames", "font_size = 30.0\n").frame_rate,
+            0.0,
+            "no rate means the loop waits for something to change"
+        );
+        assert_eq!(config("zero-frames", "frame_rate = 0.0\n").frame_rate, 0.0);
+        assert_eq!(
+            config("bad-frames", "frame_rate = 'fast'\n").frame_rate,
+            0.0
+        );
+        assert_eq!(
+            config("negative-frames", "frame_rate = -5\n").frame_rate,
+            0.0,
+            "a rate below zero is no rate at all"
         );
     }
 }

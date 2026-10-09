@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use nalgebra::Vector3;
 
@@ -16,10 +17,20 @@ use winit::{
 
 use crate::WINDOW_TITLE;
 use crate::config::Config;
+use crate::drawable::Pictures;
 use crate::font::Font;
 use crate::gpu::Gpu;
 use crate::pty::Pty;
 use crate::terminal::{KeyModes, Terminal, encode_key};
+
+/// The sooner of two deadlines, either of which may be missing: the app sleeps
+/// until whichever of its clocks is due first.
+fn sooner(first: Option<Instant>, second: Option<Instant>) -> Option<Instant> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.min(second)),
+        (deadline, None) | (None, deadline) => deadline,
+    }
+}
 
 /// Wakes the event loop back up when the shell has something to say.
 #[derive(Debug)]
@@ -41,6 +52,9 @@ pub(crate) enum UserEvent {
 pub(crate) struct App {
     world: Arc<RwLock<World<UserEvent>>>,
     entity: Id,
+    /// Frames a second the config asked the app to draw, for a shader that
+    /// moves. Zero means the loop only draws when something changed.
+    frame_rate: f32,
 }
 
 impl App {
@@ -69,6 +83,7 @@ impl App {
         // world, and a `config.py` that touched it would deadlock against a
         // guard held here.
         let config = Config::load(Arc::clone(&world));
+        let frame_rate = config.frame_rate;
 
         world.read().unwrap().attach_value(entity, config);
 
@@ -79,7 +94,11 @@ impl App {
             .unwrap()
             .add_system(0, TerminalSystem::new(entity, proxy));
 
-        Ok(Self { world, entity })
+        Ok(Self {
+            world,
+            entity,
+            frame_rate,
+        })
     }
 
     /// Runs one event through the world's systems, stopping the loop if a
@@ -124,6 +143,9 @@ struct TerminalSystem {
     /// Output the reader thread collected that the grid has not parsed yet.
     pending: Arc<Mutex<Vec<u8>>>,
     modifiers: ModifiersState,
+    /// Frames a second the config asked the app to draw: a shader that reads
+    /// the clock needs a frame to move in, whatever the blink phase is doing.
+    frame_rate: f32,
     /// Used to wake the event loop up when the shell writes something.
     proxy: EventLoopProxy<UserEvent>,
 }
@@ -134,6 +156,7 @@ impl TerminalSystem {
             entity,
             pending: Arc::new(Mutex::new(Vec::new())),
             modifiers: ModifiersState::empty(),
+            frame_rate: 0.0,
             proxy,
         }
     }
@@ -292,6 +315,10 @@ impl System<UserEvent> for TerminalSystem {
         let font = world.attach_value(self.entity, Font::load(config.font_size)?);
         world.attach_value(self.entity, Terminal::new(font, config.background));
 
+        // The rate the frame clock runs at, kept here so that a wake-up does
+        // not have to read the config back out of the world.
+        self.frame_rate = config.frame_rate;
+
         // Reads from the pty block, so they happen on the reader thread and the
         // result is handed to the event loop as a user event.
         let sink = Arc::clone(&self.pending);
@@ -339,11 +366,15 @@ impl System<UserEvent> for TerminalSystem {
                     self.request_redraw(&world);
                 }
                 Event::UserEvent(UserEvent::Blink) => {
-                    // Only redraw when the phase really moved: this event is
-                    // dispatched on every wake-up, deadlines included.
-                    if let Some(terminal) = self.terminal(&world)
-                        && terminal.write().unwrap().tick_blink()
-                    {
+                    // A clock-driven frame is drawn whatever the phase is doing;
+                    // otherwise only a phase that really moved is worth one.
+                    // This event is dispatched on every wake-up, deadlines
+                    // included.
+                    let moved = self
+                        .terminal(&world)
+                        .is_some_and(|terminal| terminal.write().unwrap().tick_blink());
+
+                    if self.frame_rate > 0.0 || moved {
                         self.request_redraw(&world);
                     }
                 }
@@ -390,7 +421,10 @@ impl ApplicationHandler<UserEvent> for App {
             config.background,
             config.cursor_color,
             config.shader.as_deref(),
-            config.background_image.as_deref(),
+            Pictures {
+                background: config.background_image.as_deref(),
+                foreground: config.foreground_image.as_deref(),
+            },
         )) {
             Ok(gpu) => gpu,
             Err(error) => {
@@ -422,13 +456,16 @@ impl ApplicationHandler<UserEvent> for App {
         // this is the one event the app makes up itself.
         self.dispatch(event_loop, Event::UserEvent(UserEvent::Blink));
 
-        // Then sleep until the clock's next flip, so a quiet shell costs
-        // nothing at all. `Wait` is enough once nothing on screen blinks.
-        let deadline = self
+        // Then sleep until the clock's next flip — and until the next frame,
+        // when the config asked for a rate — so a quiet shell costs nothing at
+        // all while nothing on screen is moving.
+        let blink = self
             .component::<Terminal>()
             .and_then(|terminal| terminal.read().unwrap().next_blink());
+        let frame = (self.frame_rate > 0.0)
+            .then(|| Instant::now() + Duration::from_secs_f32(self.frame_rate.recip()));
 
-        event_loop.set_control_flow(match deadline {
+        event_loop.set_control_flow(match sooner(blink, frame) {
             Some(deadline) => ControlFlow::WaitUntil(deadline),
             None => ControlFlow::Wait,
         });
