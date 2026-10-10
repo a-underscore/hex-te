@@ -32,17 +32,25 @@ Neovim open on `src/app.rs`, running inside hext:
 
 ![Neovim open inside hext](docs/screenshot-1-neovim.png)
 
-`fastfetch`, and the 16 ANSI colours a shell script asked for:
+The next three are the same terminal with `docs/config-aurora.py` loaded — which
+is what it means for the look to be a config file. The backdrop behind the grid
+is the shader that file names, and the colours *on* the grid are still the ones
+the shell asked for: the aurora draws behind the ink, it does not re-grade it.
 
-![fastfetch and the 16 ANSI colours](docs/screenshot-2-fastfetch.png)
+`fastfetch`, and the sixteen ANSI colours a shell script asked for, over the
+aurora:
 
-A fresh prompt, the window filled by the configured background:
+![fastfetch and the 16 ANSI colours, over the aurora](docs/screenshot-2-fastfetch.png)
 
-![A prompt on an otherwise empty screen](docs/screenshot-3-prompt.png)
+A fresh prompt in the same window. The sky is one frame of a shader that moves,
+because the config sets `animate = True`:
 
-The colour swatch again, from a later capture:
+![A prompt over the aurora](docs/screenshot-3-prompt.png)
 
-![The 16 ANSI colour swatch again](docs/screenshot-4-colours.png)
+The sixteen colours on their own, in three rows: the palette is the terminal's
+own, drawn over whatever the shader puts behind it.
+
+![The 16 ANSI colours over the aurora](docs/screenshot-4-colours.png)
 
 ## Current behavior
 
