@@ -128,10 +128,14 @@ The colour swatch again, from a later capture:
 - Draws the screen as ink over a backdrop: the screen texture carries how much of
   each pixel the grid covers in its alpha, so a picture named by
   `background_image` shows through every cell a program left unpainted, and a
-  cell that asked for a colour of its own covers it.
+  cell that asked for a colour of its own covers it. The picture is composited
+  over the `background` colour by its own alpha, so a transparent part of it is a
+  shape rather than a rectangle.
 - Puts a second picture over all of it: `foreground_image` is drawn last, over
   the text, the selection and the cursor, which is where the glass of a CRT — a
-  shadow mask, a grille, a glare — belongs.
+  shadow mask, a grille, a glare — belongs. A picture with no alpha channel is
+  opaque everywhere, so it covers the screen instead of overlaying it; hext says
+  so when it loads one as the overlay.
 
 Not implemented yet: wide (CJK) double-width cells, scrollback, the alternate
 screen, mouse reporting, and the second half of the Symbols for Legacy Computing
@@ -209,7 +213,7 @@ so the picture shows through wherever a program left a cell unpainted.
 That means a full-screen program which paints its own background covers the
 picture, and Neovim does exactly that by default: set `hi Normal guibg=NONE
 ctermbg=NONE` (or `:set notermguicolors`) and its cells go back to the terminal's
-ow colour. Highlighted regions, a status line, a `\x1b[41m` background — anything
+own colour. Highlighted regions, a status line, a `\x1b[41m` background — anything
 that asked for a colour of its own — stay opaque on top of the picture.
 
 A picture that cannot be read is reported and the `background` colour used
@@ -239,7 +243,7 @@ decoder cannot invent that: a file with no alpha channel — a three-channel PNG
 or any JPEG — becomes opaque everywhere, and covers the screen instead of lying
 over it. hext says so when it loads one. The screenshots in `docs/` are
 three-channel, which is why they are pictures *of* the terminal rather than
-masks for one:
+masks for one.
 
 ### Custom shaders
 
@@ -277,21 +281,23 @@ be read instead of pasted:
 shader = open("/home/you/.config/hext/crt.wgsl").read()
 ```
 
-Because the screen texture is ink rather than a finished picture, the one line a
-shader usually has to start with is the composite:
+Because the screen texture is ink rather than a finished picture, the lines a
+shader usually starts with are the composite:
 
 ```wgsl
 let ink = textureSample(screen_tex, screen_sampler, uv);
-let backdrop = textureSample(background_tex, screen_sampler, uv).rgb;
+let picture = textureSample(background_tex, screen_sampler, uv);
+let backdrop = mix(screen.background.rgb, picture.rgb, picture.a);
 var color = mix(backdrop, ink.rgb, ink.a);
 ```
 
-Effect shaders spread that line out — the aberration in the CRT config shifts the
-texture sideways per channel, so the alpha comes from the unshifted sample and the
-colour from the shifted ones. Anything that ignores the alpha shows the plain
-`background` colour behind the text whatever `background_image` says. The overlay
-is the last thing the reference shader does, so a shader that draws one puts it
-after the cursor and after whatever else it did:
+Effect shaders spread that out — `docs/config-neon.py` samples the grid a pixel
+apart per channel for its aberration, so the alpha comes from the unshifted
+sample and the colour from the shifted ones. Anything that ignores the grid's
+alpha shows the terminal's background colour wherever a program left a cell
+unpainted, whatever `background_image` says. The overlay is the last thing the
+reference shader does, so a shader that draws one puts it after the cursor and
+after whatever else it did:
 
 ```wgsl
 let glass = textureSample(foreground_tex, screen_sampler, uv);
@@ -341,7 +347,11 @@ fn sky(uv: vec2<f32>, time: f32) -> vec3<f32> {
 ```
 
 `docs/config-aurora.py` is a whole shader built on this: a night sky with bands
-of light drifting across it, then the grid, then a vignette, scanlines and grain.
+of light drifting across it, then the grid, then a vignette and scanlines. The
+only noise in it is a dither fixed to the pixel rather than to the frame — a two
+hundred and fifty-fifth of a step, which keeps a dark gradient from banding
+without putting anything that moves over the picture. Noise that is redrawn every
+frame is what makes an animated shader look grainy.
 
 ### Reloading
 
@@ -475,8 +485,8 @@ shader clock does: without it there is no next frame to land on.
 | `src/render/` | Everything that draws |
 | `src/render/mod.rs` | Groups the two and re-exports `Gpu` and `Drawable`; the only place that mentions wgpu |
 | `src/render/gpu.rs` | Owns the window, the surface, the device and the drawable, and drives one frame |
-| `src/render/drawable.rs` | The draw a frame ends with: the screen pipeline, the bind group, the uniform, the picture behind the grid, and the render systems a config file can add |
-| `src/render/shaders/screen.wgsl` | Composites the grid over the background picture and draws the cursor overlay |
+| `src/render/drawable.rs` | The draw a frame ends with: the screen pipeline, the bind group, the uniform, the two pictures and the one-pixel backdrop, and the render systems a config file can add |
+| `src/render/shaders/screen.wgsl` | Composites the grid over the backdrop and the foreground picture over that, and draws the cursor |
 | `src/world/` | The entity-component world |
 | `src/world/mod.rs` | The entity and system managers, the ambient values, and the pipeline numbers |
 | `src/world/control.rs` | The event value a system is handed each turn, plus its `exit` flag |
@@ -526,7 +536,8 @@ The ambient values reach a renderer as `world::AmbientUniform`: a padding-free
   and `pyo3` embeds an interpreter to evaluate it. `pyo3` locates the interpreter
   through `python3` on `PATH` (or `PYO3_PYTHON`).
 
-`cargo test` covers the grid, the world and the config, and validates the shader
+`cargo test` covers the grid, the world and the config, and validates the shaders
+the repository ships — the built-in one and the two examples in `docs/` —
 without needing a GPU or a PTY. The config tests need a Python interpreter, the
 tests that rasterize glyphs need a system monospace font, and the clipboard test
 needs a session to talk to: it is skipped rather than failed when there is none,
