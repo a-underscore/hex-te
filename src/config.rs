@@ -293,8 +293,34 @@ impl Config {
             config.shader = setting_text(&globals, "shader");
             config.background_image = setting_path(&globals, "background_image");
             config.foreground_image = setting_path(&globals, "foreground_image");
+            // The other settings the file documents. Reading them is what makes
+            // them settings rather than notes: the window, the font, the shell
+            // and the two colours all come from here, and one of the wrong type
+            // keeps the default the file is written with.
+            config.shell = setting_text(&globals, "shell").filter(|shell| !shell.is_empty());
+
             if let Some(animate) = setting_bool(&globals, "animate") {
                 config.animate = animate;
+            }
+
+            if let Some(size) = setting_number(&globals, "font_size") {
+                config.font_size = size;
+            }
+
+            if let Some(width) = setting_size(&globals, "window_width") {
+                config.window_size.0 = width;
+            }
+
+            if let Some(height) = setting_size(&globals, "window_height") {
+                config.window_size.1 = height;
+            }
+
+            if let Some(background) = setting_color(&globals, "background") {
+                config.background = background;
+            }
+
+            if let Some(cursor) = setting_color(&globals, "cursor_color") {
+                config.cursor_color = cursor;
             }
 
             Ok(())
@@ -321,20 +347,68 @@ fn setting_path(globals: &Bound<'_, PyDict>, name: &str) -> Option<PathBuf> {
 /// config was built with: one bad setting should not stop the rest of the file
 /// working, so the problem is reported and the default kept.
 fn setting_text(globals: &Bound<'_, PyDict>, name: &str) -> Option<String> {
-    let value = match globals.get_item(name) {
-        Ok(Some(value)) if !value.is_none() => value,
-        Ok(_) => return None,
-        Err(error) => {
-            eprintln!("{WINDOW_TITLE}: {name}: {error}");
-
-            return None;
-        }
-    };
-
-    match value.extract::<String>() {
+    match setting_value(globals, name)?.extract::<String>() {
         Ok(text) => Some(text),
         Err(error) => {
             eprintln!("{WINDOW_TITLE}: {name} is not text: {error}");
+
+            None
+        }
+    }
+}
+
+/// Reads a setting that holds a number, as a `f32`.
+///
+/// Numbers are the one setting where a wrong type is easy to write by accident
+/// (`font_size = "big"`), so it is reported and the default kept like any other.
+fn setting_number(globals: &Bound<'_, PyDict>, name: &str) -> Option<f32> {
+    match setting_value(globals, name)?.extract::<f32>() {
+        Ok(number) => Some(number),
+        Err(error) => {
+            eprintln!("{WINDOW_TITLE}: {name} is not a number: {error}");
+
+            None
+        }
+    }
+}
+
+/// Reads a setting that holds a whole number of pixels, as a `u32`.
+fn setting_size(globals: &Bound<'_, PyDict>, name: &str) -> Option<u32> {
+    match setting_value(globals, name)?.extract::<u32>() {
+        Ok(size) => Some(size),
+        Err(error) => {
+            eprintln!("{WINDOW_TITLE}: {name} is not a size: {error}");
+
+            None
+        }
+    }
+}
+
+/// Reads a setting that holds a colour, as the `r, g, b, a` a terminal holds.
+///
+/// The file writes colours as `(r, g, b)` triples, so the alpha — which nothing
+/// draws with yet — is filled in as opaque here.
+fn setting_color(globals: &Bound<'_, PyDict>, name: &str) -> Option<[f32; 4]> {
+    match setting_value(globals, name)?.extract::<(f32, f32, f32)>() {
+        Ok((r, g, b)) => Some([r, g, b, 1.0]),
+        Err(error) => {
+            eprintln!("{WINDOW_TITLE}: {name} is not an (r, g, b) colour: {error}");
+
+            None
+        }
+    }
+}
+
+/// The value of a setting that is present and is not `None`.
+///
+/// Every reader below starts here, so that "the file did not say" and "the file
+/// said `None`" are the same thing: the default the config was built with.
+fn setting_value<'py>(globals: &Bound<'py, PyDict>, name: &str) -> Option<Bound<'py, PyAny>> {
+    match globals.get_item(name) {
+        Ok(Some(value)) if !value.is_none() => Some(value),
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("{WINDOW_TITLE}: {name}: {error}");
 
             None
         }
@@ -347,17 +421,7 @@ fn setting_text(globals: &Bound<'_, PyDict>, name: &str) -> Option<String> {
 /// only an absent setting, `None` or the wrong type that keeps the default the
 /// config was built with.
 fn setting_bool(globals: &Bound<'_, PyDict>, name: &str) -> Option<bool> {
-    let value = match globals.get_item(name) {
-        Ok(Some(value)) if !value.is_none() => value,
-        Ok(_) => return None,
-        Err(error) => {
-            eprintln!("{WINDOW_TITLE}: {name}: {error}");
-
-            return None;
-        }
-    };
-
-    match value.extract::<bool>() {
+    match setting_value(globals, name)?.extract::<bool>() {
         Ok(flag) => Some(flag),
         Err(error) => {
             eprintln!("{WINDOW_TITLE}: {name} is not a flag: {error}");
@@ -906,6 +970,52 @@ mod tests {
             overlay.foreground_image.as_deref(),
             Some(std::path::Path::new("/tmp/mask.png"))
         );
+    }
+
+    #[test]
+    fn the_settings_the_file_documents_are_all_read_back() {
+        let config = config(
+            "all-settings",
+            "font_size = 20.0\n\
+             window_width = 800\n\
+             window_height = 400\n\
+             shell = '/bin/dash'\n\
+             background = (0.1, 0.2, 0.3)\n\
+             cursor_color = (0.4, 0.5, 0.6)\n",
+        );
+
+        assert_eq!(config.font_size, 20.0);
+        assert_eq!(config.window_size, (800, 400));
+        assert_eq!(config.shell.as_deref(), Some("/bin/dash"));
+        assert_eq!(config.background, [0.1, 0.2, 0.3, 1.0], "opaque");
+        assert_eq!(config.cursor_color, [0.4, 0.5, 0.6, 1.0]);
+    }
+
+    #[test]
+    fn a_setting_of_the_wrong_type_keeps_the_default_the_file_documents() {
+        // One bad setting is a note and a default, not a config that fails: the
+        // rest of the file still works.
+        let config = config(
+            "wrong-types",
+            "font_size = 'big'\n\
+             window_width = -1\n\
+             shell = 42\n\
+             background = 'blue'\n\
+             cursor_color = (1.0, 2.0)\n",
+        );
+        let default = Config::default();
+
+        assert_eq!(config.font_size, default.font_size);
+        assert_eq!(config.window_size, default.window_size);
+        assert_eq!(config.shell, default.shell);
+        assert_eq!(config.background, default.background);
+        assert_eq!(config.cursor_color, default.cursor_color);
+    }
+
+    #[test]
+    fn an_empty_shell_name_means_the_shell_the_user_already_has() {
+        assert_eq!(config("empty-shell", "shell = ''\n").shell, None);
+        assert_eq!(config("none-shell", "shell = None\n").shell, None);
     }
 
     #[test]
